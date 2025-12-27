@@ -127,7 +127,21 @@ Create `~/.config/opencode/supermemory.jsonc`:
 
 All fields optional. Env var `SUPERMEMORY_API_KEY` takes precedence over config file.
 
-API timeout: 5s
+API timeout: 30s
+
+## Usage with Oh My OpenCode
+
+If you're using [Oh My OpenCode](https://github.com/code-yeongyu/oh-my-opencode), disable its built-in auto-compact hook to let supermemory handle context compaction:
+
+Add to `~/.config/opencode/oh-my-opencode.json`:
+
+```json
+{
+  "disabled_hooks": ["anthropic-auto-compact"]
+}
+```
+
+This ensures supermemory's preemptive compaction (which preserves memories across sessions) works correctly instead of oh-my-opencode's default compaction.
 
 ## Hooks
 
