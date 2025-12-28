@@ -29,6 +29,7 @@
   },
   "dependencies": {
     "@opencode-ai/plugin": "^1.0.162",
+    "jsonc-parser": "^3.3.1",
     "supermemory": "^4.0.0"
   },
   "devDependencies": {

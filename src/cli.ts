@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import * as readline from "node:readline";
+import { parse, modify, applyEdits } from "jsonc-parser";
 
 const OPENCODE_CONFIG_DIR = join(homedir(), ".config", "opencode");
 const OPENCODE_COMMAND_DIR = join(OPENCODE_CONFIG_DIR, "command");
@@ -167,7 +168,10 @@ function createReadline(): readline.Interface {
   });
 }
 
-async function confirm(rl: readline.Interface, question: string): Promise<boolean> {
+async function confirm(
+  rl: readline.Interface,
+  question: string,
+): Promise<boolean> {
   return new Promise((resolve) => {
     rl.question(`${question} (y/n) `, (answer) => {
       resolve(answer.toLowerCase() === "y" || answer.toLowerCase() === "yes");
@@ -177,7 +181,7 @@ async function confirm(rl: readline.Interface, question: string): Promise<boolea
 
 async function installPlugin(): Promise<boolean> {
   const { execSync } = await import("node:child_process");
-  
+
   // Detect package manager
   let pm = "npm";
   try {
@@ -193,7 +197,7 @@ async function installPlugin(): Promise<boolean> {
   }
 
   console.log(`Installing ${PLUGIN_NAME} with ${pm}...`);
-  
+
   try {
     execSync(`${pm} install -g ${PLUGIN_NAME}`, { stdio: "inherit" });
     return true;
@@ -219,8 +223,10 @@ function createCommand(): boolean {
 
 function findOpencodeConfig(): string | null {
   const candidates = [
-    join(OPENCODE_CONFIG_DIR, "config.jsonc"),
-    join(OPENCODE_CONFIG_DIR, "config.json"),
+    join(OPENCODE_CONFIG_DIR, "opencode.jsonc"),
+    join(OPENCODE_CONFIG_DIR, "opencode.json"),
+    join(OPENCODE_CONFIG_DIR, "config.jsonc"), // legacy
+    join(OPENCODE_CONFIG_DIR, "config.json"), // legacy
   ];
 
   for (const path of candidates) {
@@ -235,57 +241,22 @@ function findOpencodeConfig(): string | null {
 function addPluginToConfig(configPath: string): boolean {
   try {
     const content = readFileSync(configPath, "utf-8");
-    
-    // Check if plugin already registered
+
     if (content.includes("opencode-supermemory")) {
       console.log("Plugin already in config");
       return true;
     }
 
-    // Parse JSONC (strip comments for parsing)
-    const jsonContent = content.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
-    let config: Record<string, unknown>;
-    
-    try {
-      config = JSON.parse(jsonContent);
-    } catch {
-      console.error("Failed to parse config file");
-      return false;
-    }
+    const config = parse(content, undefined, { allowTrailingComma: true });
+    const existingPlugins = (config?.plugin as string[]) || [];
+    const newPlugins = [...existingPlugins, PLUGIN_NAME];
 
-    // Add plugin to array
-    const plugins = (config.plugin as string[]) || [];
-    plugins.push(PLUGIN_NAME);
-    config.plugin = plugins;
+    const edits = modify(content, ["plugin"], newPlugins, {
+      formattingOptions: { tabSize: 2, insertSpaces: true, eol: "\n" },
+    });
 
-    // Write back (preserve formatting if possible)
-    if (configPath.endsWith(".jsonc")) {
-      // For JSONC, just append to plugin array in original content
-      if (content.includes('"plugin"')) {
-        // Find plugin array and add to it
-        const newContent = content.replace(
-          /("plugin"\s*:\s*\[)([^\]]*?)(\])/,
-          (_match, start, middle, end) => {
-            const trimmed = middle.trim();
-            if (trimmed === "") {
-              return `${start}\n    "${PLUGIN_NAME}"\n  ${end}`;
-            }
-            return `${start}${middle.trimEnd()},\n    "${PLUGIN_NAME}"\n  ${end}`;
-          }
-        );
-        writeFileSync(configPath, newContent);
-      } else {
-        // No plugin key, add it
-        const newContent = content.replace(
-          /^(\s*\{)/,
-          `$1\n  "plugin": ["${PLUGIN_NAME}"],`
-        );
-        writeFileSync(configPath, newContent);
-      }
-    } else {
-      // For JSON, just write formatted
-      writeFileSync(configPath, JSON.stringify(config, null, 2));
-    }
+    const newContent = applyEdits(content, edits);
+    writeFileSync(configPath, newContent);
 
     console.log(`Added ${PLUGIN_NAME} to ${configPath}`);
     return true;
@@ -296,13 +267,13 @@ function addPluginToConfig(configPath: string): boolean {
 }
 
 function createNewConfig(): boolean {
-  const configPath = join(OPENCODE_CONFIG_DIR, "config.jsonc");
+  const configPath = join(OPENCODE_CONFIG_DIR, "opencode.jsonc");
   mkdirSync(OPENCODE_CONFIG_DIR, { recursive: true });
-  
+
   const config = {
     plugin: [PLUGIN_NAME],
   };
-  
+
   writeFileSync(configPath, JSON.stringify(config, null, 2));
   console.log(`Created ${configPath} with plugin registered`);
   return true;
@@ -314,7 +285,10 @@ async function setup(): Promise<void> {
   console.log("\nopencode-supermemory setup\n");
 
   // Step 1: Install plugin globally
-  const shouldInstall = await confirm(rl, "Install opencode-supermemory globally?");
+  const shouldInstall = await confirm(
+    rl,
+    "Install opencode-supermemory globally?",
+  );
   if (!shouldInstall) {
     console.log("Aborted.");
     rl.close();
@@ -329,7 +303,10 @@ async function setup(): Promise<void> {
   }
 
   // Step 2: Create command
-  const shouldCreateCommand = await confirm(rl, "Add /supermemory-init command?");
+  const shouldCreateCommand = await confirm(
+    rl,
+    "Add /supermemory-init command?",
+  );
   if (!shouldCreateCommand) {
     console.log("Aborted.");
     rl.close();
@@ -340,9 +317,12 @@ async function setup(): Promise<void> {
 
   // Step 3: Add to config
   const configPath = findOpencodeConfig();
-  
+
   if (configPath) {
-    const shouldModifyConfig = await confirm(rl, `Add plugin to ${configPath}?`);
+    const shouldModifyConfig = await confirm(
+      rl,
+      `Add plugin to ${configPath}?`,
+    );
     if (!shouldModifyConfig) {
       console.log("Aborted.");
       rl.close();
@@ -350,7 +330,10 @@ async function setup(): Promise<void> {
     }
     addPluginToConfig(configPath);
   } else {
-    const shouldCreateConfig = await confirm(rl, "No OpenCode config found. Create one?");
+    const shouldCreateConfig = await confirm(
+      rl,
+      "No OpenCode config found. Create one?",
+    );
     if (!shouldCreateConfig) {
       console.log("Aborted.");
       rl.close();
@@ -361,7 +344,7 @@ async function setup(): Promise<void> {
 
   console.log("\nSetup complete!");
   console.log("Set SUPERMEMORY_API_KEY and restart OpenCode.");
-  
+
   rl.close();
 }
 
