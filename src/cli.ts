@@ -6,7 +6,7 @@ import * as readline from "node:readline";
 
 const OPENCODE_CONFIG_DIR = join(homedir(), ".config", "opencode");
 const OPENCODE_COMMAND_DIR = join(OPENCODE_CONFIG_DIR, "command");
-const PLUGIN_NAME = "opencode-supermemory";
+const PLUGIN_NAME = "opencode-supermemory@latest";
 
 const SUPERMEMORY_INIT_COMMAND = `---
 description: Initialize Supermemory with comprehensive codebase knowledge
