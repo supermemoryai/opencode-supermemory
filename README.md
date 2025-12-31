@@ -9,7 +9,7 @@ Your agent remembers what you tell it - across sessions, across projects.
 ### For Humans
 
 ```bash
-bunx opencode-supermemory install
+bunx opencode-supermemory@latest install
 ```
 
 Then get your API key from [console.supermemory.ai](https://console.supermemory.ai) and set it:
@@ -33,7 +33,7 @@ If you're an LLM agent helping set up opencode-supermemory, follow these steps:
 #### Step 1: Run the installer
 
 ```bash
-bunx opencode-supermemory install --no-tui
+bunx opencode-supermemory@latest install --no-tui
 ```
 
 This will:
