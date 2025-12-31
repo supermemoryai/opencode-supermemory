@@ -6,6 +6,7 @@ import * as readline from "node:readline";
 
 const OPENCODE_CONFIG_DIR = join(homedir(), ".config", "opencode");
 const OPENCODE_COMMAND_DIR = join(OPENCODE_CONFIG_DIR, "command");
+const OH_MY_OPENCODE_CONFIG = join(OPENCODE_CONFIG_DIR, "oh-my-opencode.json");
 const PLUGIN_NAME = "opencode-supermemory@latest";
 
 const SUPERMEMORY_INIT_COMMAND = `---
@@ -269,8 +270,58 @@ function createCommand(): boolean {
   return true;
 }
 
+function isOhMyOpencodeInstalled(): boolean {
+  const configPath = findOpencodeConfig();
+  if (!configPath) return false;
+  
+  try {
+    const content = readFileSync(configPath, "utf-8");
+    return content.includes("oh-my-opencode");
+  } catch {
+    return false;
+  }
+}
+
+function isAutoCompactAlreadyDisabled(): boolean {
+  if (!existsSync(OH_MY_OPENCODE_CONFIG)) return false;
+  
+  try {
+    const content = readFileSync(OH_MY_OPENCODE_CONFIG, "utf-8");
+    const config = JSON.parse(content);
+    const disabledHooks = config.disabled_hooks as string[] | undefined;
+    return disabledHooks?.includes("anthropic-auto-compact") ?? false;
+  } catch {
+    return false;
+  }
+}
+
+function disableAutoCompactHook(): boolean {
+  try {
+    let config: Record<string, unknown> = {};
+    
+    if (existsSync(OH_MY_OPENCODE_CONFIG)) {
+      const content = readFileSync(OH_MY_OPENCODE_CONFIG, "utf-8");
+      config = JSON.parse(content);
+    }
+    
+    const disabledHooks = (config.disabled_hooks as string[]) || [];
+    if (!disabledHooks.includes("anthropic-auto-compact")) {
+      disabledHooks.push("anthropic-auto-compact");
+    }
+    config.disabled_hooks = disabledHooks;
+    
+    writeFileSync(OH_MY_OPENCODE_CONFIG, JSON.stringify(config, null, 2));
+    console.log(`✓ Disabled anthropic-auto-compact hook in oh-my-opencode.json`);
+    return true;
+  } catch (err) {
+    console.error("✗ Failed to update oh-my-opencode.json:", err);
+    return false;
+  }
+}
+
 interface InstallOptions {
   tui: boolean;
+  disableAutoCompact: boolean;
 }
 
 async function install(options: InstallOptions): Promise<number> {
@@ -319,7 +370,31 @@ async function install(options: InstallOptions): Promise<number> {
     createCommand();
   }
 
-  // Step 3: API key instructions
+  // Step 3: Configure Oh My OpenCode (if installed)
+  if (isOhMyOpencodeInstalled()) {
+    console.log("\nStep 3: Configure Oh My OpenCode");
+    console.log("Detected Oh My OpenCode plugin.");
+    console.log("Supermemory handles context compaction, so the built-in auto-compact hook should be disabled.");
+    
+    if (isAutoCompactAlreadyDisabled()) {
+      console.log("✓ anthropic-auto-compact hook already disabled");
+    } else {
+      if (options.tui) {
+        const shouldDisable = await confirm(rl!, "Disable anthropic-auto-compact hook to let Supermemory handle context?");
+        if (!shouldDisable) {
+          console.log("Skipped.");
+        } else {
+          disableAutoCompactHook();
+        }
+      } else if (options.disableAutoCompact) {
+        disableAutoCompactHook();
+      } else {
+        console.log("Skipped. Use --disable-auto-compact to disable the hook in non-interactive mode.");
+      }
+    }
+  }
+
+  // Step 4: API key instructions
   console.log("\n" + "─".repeat(50));
   console.log("\n🔑 Final step: Set your API key\n");
   console.log("Get your API key from: https://console.supermemory.ai");
@@ -339,12 +414,14 @@ function printHelp(): void {
 opencode-supermemory - Persistent memory for OpenCode agents
 
 Commands:
-  install          Install and configure the plugin
-    --no-tui       Run in non-interactive mode (for LLM agents)
+  install                    Install and configure the plugin
+    --no-tui                 Run in non-interactive mode (for LLM agents)
+    --disable-auto-compact   Disable Oh My OpenCode's auto-compact hook (use with --no-tui)
 
 Examples:
-  bunx opencode-supermemory install
-  bunx opencode-supermemory install --no-tui
+  bunx opencode-supermemory@latest install
+  bunx opencode-supermemory@latest install --no-tui
+  bunx opencode-supermemory@latest install --no-tui --disable-auto-compact
 `);
 }
 
@@ -357,12 +434,14 @@ if (args.length === 0 || args[0] === "help" || args[0] === "--help" || args[0] =
 
 if (args[0] === "install") {
   const noTui = args.includes("--no-tui");
-  install({ tui: !noTui }).then((code) => process.exit(code));
+  const disableAutoCompact = args.includes("--disable-auto-compact");
+  install({ tui: !noTui, disableAutoCompact }).then((code) => process.exit(code));
 } else if (args[0] === "setup") {
   // Backwards compatibility
   console.log("Note: 'setup' is deprecated. Use 'install' instead.\n");
   const noTui = args.includes("--no-tui");
-  install({ tui: !noTui }).then((code) => process.exit(code));
+  const disableAutoCompact = args.includes("--disable-auto-compact");
+  install({ tui: !noTui, disableAutoCompact }).then((code) => process.exit(code));
 } else {
   console.error(`Unknown command: ${args[0]}`);
   printHelp();
