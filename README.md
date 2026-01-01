@@ -228,7 +228,7 @@ Add to `~/.config/opencode/oh-my-opencode.json`:
 
 ```json
 {
-  "disabled_hooks": ["anthropic-auto-compact"]
+  "disabled_hooks": ["anthropic-context-window-limit-recovery"]
 }
 ```
 
