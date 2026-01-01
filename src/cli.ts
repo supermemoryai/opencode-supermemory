@@ -289,7 +289,7 @@ function isAutoCompactAlreadyDisabled(): boolean {
     const content = readFileSync(OH_MY_OPENCODE_CONFIG, "utf-8");
     const config = JSON.parse(content);
     const disabledHooks = config.disabled_hooks as string[] | undefined;
-    return disabledHooks?.includes("anthropic-auto-compact") ?? false;
+    return disabledHooks?.includes("anthropic-context-window-limit-recovery") ?? false;
   } catch {
     return false;
   }
@@ -305,13 +305,13 @@ function disableAutoCompactHook(): boolean {
     }
     
     const disabledHooks = (config.disabled_hooks as string[]) || [];
-    if (!disabledHooks.includes("anthropic-auto-compact")) {
-      disabledHooks.push("anthropic-auto-compact");
+    if (!disabledHooks.includes("anthropic-context-window-limit-recovery")) {
+      disabledHooks.push("anthropic-context-window-limit-recovery");
     }
     config.disabled_hooks = disabledHooks;
     
     writeFileSync(OH_MY_OPENCODE_CONFIG, JSON.stringify(config, null, 2));
-    console.log(`✓ Disabled anthropic-auto-compact hook in oh-my-opencode.json`);
+    console.log(`✓ Disabled anthropic-context-window-limit-recovery hook in oh-my-opencode.json`);
     return true;
   } catch (err) {
     console.error("✗ Failed to update oh-my-opencode.json:", err);
@@ -374,13 +374,13 @@ async function install(options: InstallOptions): Promise<number> {
   if (isOhMyOpencodeInstalled()) {
     console.log("\nStep 3: Configure Oh My OpenCode");
     console.log("Detected Oh My OpenCode plugin.");
-    console.log("Supermemory handles context compaction, so the built-in auto-compact hook should be disabled.");
+    console.log("Supermemory handles context compaction, so the built-in context-window-limit-recovery hook should be disabled.");
     
     if (isAutoCompactAlreadyDisabled()) {
-      console.log("✓ anthropic-auto-compact hook already disabled");
+      console.log("✓ anthropic-context-window-limit-recovery hook already disabled");
     } else {
       if (options.tui) {
-        const shouldDisable = await confirm(rl!, "Disable anthropic-auto-compact hook to let Supermemory handle context?");
+        const shouldDisable = await confirm(rl!, "Disable anthropic-context-window-limit-recovery hook to let Supermemory handle context?");
         if (!shouldDisable) {
           console.log("Skipped.");
         } else {
@@ -389,7 +389,7 @@ async function install(options: InstallOptions): Promise<number> {
       } else if (options.disableAutoCompact) {
         disableAutoCompactHook();
       } else {
-        console.log("Skipped. Use --disable-auto-compact to disable the hook in non-interactive mode.");
+        console.log("Skipped. Use --disable-context-recovery to disable the hook in non-interactive mode.");
       }
     }
   }
@@ -416,12 +416,12 @@ opencode-supermemory - Persistent memory for OpenCode agents
 Commands:
   install                    Install and configure the plugin
     --no-tui                 Run in non-interactive mode (for LLM agents)
-    --disable-auto-compact   Disable Oh My OpenCode's auto-compact hook (use with --no-tui)
+    --disable-context-recovery   Disable Oh My OpenCode's context-window-limit-recovery hook (use with --no-tui)
 
 Examples:
   bunx opencode-supermemory@latest install
   bunx opencode-supermemory@latest install --no-tui
-  bunx opencode-supermemory@latest install --no-tui --disable-auto-compact
+  bunx opencode-supermemory@latest install --no-tui --disable-context-recovery
 `);
 }
 
@@ -434,13 +434,13 @@ if (args.length === 0 || args[0] === "help" || args[0] === "--help" || args[0] =
 
 if (args[0] === "install") {
   const noTui = args.includes("--no-tui");
-  const disableAutoCompact = args.includes("--disable-auto-compact");
+  const disableAutoCompact = args.includes("--disable-context-recovery");
   install({ tui: !noTui, disableAutoCompact }).then((code) => process.exit(code));
 } else if (args[0] === "setup") {
   // Backwards compatibility
   console.log("Note: 'setup' is deprecated. Use 'install' instead.\n");
   const noTui = args.includes("--no-tui");
-  const disableAutoCompact = args.includes("--disable-auto-compact");
+  const disableAutoCompact = args.includes("--disable-context-recovery");
   install({ tui: !noTui, disableAutoCompact }).then((code) => process.exit(code));
 } else {
   console.error(`Unknown command: ${args[0]}`);
