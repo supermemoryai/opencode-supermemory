@@ -48,6 +48,7 @@ interface SummarizeContext {
   modelID: string;
   usageRatio: number;
   directory: string;
+  agent?: string;
 }
 
 export interface CompactionOptions {
@@ -282,7 +283,7 @@ export function createCompactionHook(
     const prompt = createCompactionPrompt(projectMemories);
 
     const success = injectHookMessage(summarizeCtx.sessionID, prompt, {
-      agent: "general",
+      agent: summarizeCtx.agent,
       model: { providerID: summarizeCtx.providerID, modelID: summarizeCtx.modelID },
       path: { cwd: summarizeCtx.directory },
     });
@@ -329,8 +330,19 @@ export function createCompactionHook(
     const tokens = lastAssistant.tokens;
     if (!tokens) return;
 
-    const modelID = lastAssistant.modelID ?? "";
-    const providerID = lastAssistant.providerID ?? "";
+    let modelID = lastAssistant.modelID ?? "";
+    let providerID = lastAssistant.providerID ?? "";
+    let agent: string | undefined;
+
+    // Fallback: find model/agent from stored messages if not available
+    const messageDir = getMessageDir(sessionID);
+    const storedMessage = messageDir ? findNearestMessageWithFields(messageDir) : null;
+    
+    if (!providerID || !modelID) {
+      if (storedMessage?.model?.providerID) providerID = storedMessage.model.providerID;
+      if (storedMessage?.model?.modelID) modelID = storedMessage.model.modelID;
+    }
+    agent = storedMessage?.agent;
 
     if (!isSupportedModel(modelID)) {
       log("[compaction] skipping unsupported model", { modelID });
@@ -381,6 +393,7 @@ export function createCompactionHook(
         modelID,
         usageRatio,
         directory: ctx.directory,
+        agent,
       });
 
       state.summarizedSessions.add(sessionID);
