@@ -101,10 +101,18 @@ export function parseJsonc(content: string): string {
         // Skip /* */ comments
         if (lookaheadChar === "/" && content[k + 1] === "*") {
           k += 2;
-          while (k < content.length - 1 && !(content[k] === "*" && content[k + 1] === "/")) {
+          let foundClosing = false;
+          while (k < content.length) {
+            if (content[k] === "*" && content[k + 1] === "/") {
+              foundClosing = true;
+              k += 2;
+              break;
+            }
             k++;
           }
-          if (k <= content.length - 2) k += 2;
+          if (!foundClosing) {
+            throw new Error("Unclosed multi-line comment in JSONC content");
+          }
           continue;
         }
         break;
