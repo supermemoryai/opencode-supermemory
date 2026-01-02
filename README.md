@@ -145,6 +145,8 @@ You: "Remember that this project uses bun"
 Agent: [saves to project memory]
 ```
 
+Add custom triggers via `keywordPatterns` config.
+
 ### Codebase Indexing
 
 Run `/supermemory-init` to explore and memorize your codebase structure, patterns, and conventions.
@@ -214,7 +216,10 @@ Create `~/.config/opencode/supermemory.jsonc`:
   "injectProfile": true,
   
   // Prefix for container tags
-  "containerTagPrefix": "opencode"
+  "containerTagPrefix": "opencode",
+  
+  // Extra keyword patterns for memory detection (regex)
+  "keywordPatterns": ["log\\s+this", "write\\s+down"]
 }
 ```
 
