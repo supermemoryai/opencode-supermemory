@@ -51,6 +51,15 @@ const DEFAULTS: Required<Omit<SupermemoryConfig, "apiKey">> = {
   keywordPatterns: [],
 };
 
+function isValidRegex(pattern: string): boolean {
+  try {
+    new RegExp(pattern);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function loadConfig(): SupermemoryConfig {
   for (const path of CONFIG_FILES) {
     if (existsSync(path)) {
@@ -80,7 +89,7 @@ export const CONFIG = {
   filterPrompt: fileConfig.filterPrompt ?? DEFAULTS.filterPrompt,
   keywordPatterns: [
     ...DEFAULT_KEYWORD_PATTERNS,
-    ...(fileConfig.keywordPatterns ?? []),
+    ...(fileConfig.keywordPatterns ?? []).filter(isValidRegex),
   ],
 };
 
