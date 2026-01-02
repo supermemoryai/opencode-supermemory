@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import * as readline from "node:readline";
-import { stripJsoncComments } from "./services/jsonc.js";
+import { parseJsonc } from "./services/jsonc.js";
 
 const OPENCODE_CONFIG_DIR = join(homedir(), ".config", "opencode");
 const OPENCODE_COMMAND_DIR = join(OPENCODE_CONFIG_DIR, "command");
@@ -201,11 +201,11 @@ function addPluginToConfig(configPath: string): boolean {
       return true;
     }
 
-    const jsonContent = stripJsoncComments(content);
+    const cleanedContent = parseJsonc(content);
     let config: Record<string, unknown>;
     
     try {
-      config = JSON.parse(jsonContent);
+      config = JSON.parse(cleanedContent);
     } catch {
       console.error("✗ Failed to parse config file");
       return false;

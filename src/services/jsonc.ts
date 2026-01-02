@@ -1,8 +1,14 @@
 /**
- * Strips comments from JSONC content while respecting string boundaries.
- * Handles // and /* comments, URLs in strings, and escaped quotes.
+ * Parses JSONC content, removing comments and trailing commas.
+ * Respects string boundaries for both operations.
+ * 
+ * Handles:
+ * - // single-line comments
+ * - /* multi-line comments
+ * - Trailing commas before } or ]
+ * - Escaped quotes and URLs in strings
  */
-export function stripJsoncComments(content: string): string {
+export function parseJsonc(content: string): string {
   let result = "";
   let i = 0;
   let inString = false;
@@ -73,6 +79,41 @@ export function stripJsoncComments(content: string): string {
       }
       i++;
       continue;
+    }
+
+    // Trailing comma detection
+    if (char === ",") {
+      // Look ahead: skip whitespace and comments, check for ] or }
+      let k = i + 1;
+      while (k < content.length) {
+        const lookaheadChar = content[k]!;
+        if (/\s/.test(lookaheadChar)) {
+          k++;
+          continue;
+        }
+        // Skip // comments
+        if (lookaheadChar === "/" && content[k + 1] === "/") {
+          k += 2;
+          while (k < content.length && content[k] !== "\n") k++;
+          if (k < content.length) k++; // skip newline
+          continue;
+        }
+        // Skip /* */ comments
+        if (lookaheadChar === "/" && content[k + 1] === "*") {
+          k += 2;
+          while (k < content.length - 1 && !(content[k] === "*" && content[k + 1] === "/")) {
+            k++;
+          }
+          if (k <= content.length - 2) k += 2;
+          continue;
+        }
+        break;
+      }
+      if (k < content.length && (content[k] === "}" || content[k] === "]")) {
+        i++;
+        while (i < content.length && content[i] === " ") i++;
+        continue;
+      }
     }
 
     result += char;

@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { stripJsoncComments } from "./services/jsonc.js";
+import { parseJsonc } from "./services/jsonc.js";
 
 const CONFIG_DIR = join(homedir(), ".config", "opencode");
 const CONFIG_FILES = [
@@ -35,8 +35,8 @@ function loadConfig(): SupermemoryConfig {
     if (existsSync(path)) {
       try {
         const content = readFileSync(path, "utf-8");
-        const json = stripJsoncComments(content);
-        return JSON.parse(json) as SupermemoryConfig;
+        const cleaned = parseJsonc(content);
+        return JSON.parse(cleaned) as SupermemoryConfig;
       } catch {
         // Invalid config, use defaults
       }
