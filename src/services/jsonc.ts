@@ -1,6 +1,7 @@
 /**
  * Strips comments from JSONC content while respecting string boundaries.
  * Handles // and /* comments, URLs in strings, and escaped quotes.
+ * Also removes trailing commas to support more relaxed JSONC format.
  */
 export function stripJsoncComments(content: string): string {
   let result = "";
@@ -79,5 +80,6 @@ export function stripJsoncComments(content: string): string {
     i++;
   }
 
-  return result;
+  // Remove trailing commas before } or ]
+  return result.replace(/,\s*([}\]])/g, "$1");
 }
