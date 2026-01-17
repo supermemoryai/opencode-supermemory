@@ -62,6 +62,14 @@ function isValidRegex(pattern: string): boolean {
   }
 }
 
+function validateCompactionThreshold(value: number | undefined): number {
+  if (value === undefined || typeof value !== 'number' || isNaN(value)) {
+    return DEFAULTS.compactionThreshold;
+  }
+  if (value <= 0 || value > 1) return DEFAULTS.compactionThreshold;
+  return value;
+}
+
 function loadConfig(): SupermemoryConfig {
   for (const path of CONFIG_FILES) {
     if (existsSync(path)) {
@@ -93,7 +101,7 @@ export const CONFIG = {
     ...DEFAULT_KEYWORD_PATTERNS,
     ...(fileConfig.keywordPatterns ?? []).filter(isValidRegex),
   ],
-  compactionThreshold: fileConfig.compactionThreshold ?? DEFAULTS.compactionThreshold,
+  compactionThreshold: validateCompactionThreshold(fileConfig.compactionThreshold),
 };
 
 export function isConfigured(): boolean {
