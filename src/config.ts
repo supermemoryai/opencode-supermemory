@@ -19,6 +19,7 @@ interface SupermemoryConfig {
   containerTagPrefix?: string;
   filterPrompt?: string;
   keywordPatterns?: string[];
+  compactionThreshold?: number;
 }
 
 const DEFAULT_KEYWORD_PATTERNS = [
@@ -49,6 +50,7 @@ const DEFAULTS: Required<Omit<SupermemoryConfig, "apiKey">> = {
   containerTagPrefix: "opencode",
   filterPrompt: "You are a stateful coding agent. Remember all the information, including but not limited to user's coding preferences, tech stack, behaviours, workflows, and any other relevant details.",
   keywordPatterns: [],
+  compactionThreshold: 0.80,
 };
 
 function isValidRegex(pattern: string): boolean {
@@ -58,6 +60,14 @@ function isValidRegex(pattern: string): boolean {
   } catch {
     return false;
   }
+}
+
+function validateCompactionThreshold(value: number | undefined): number {
+  if (value === undefined || typeof value !== 'number' || isNaN(value)) {
+    return DEFAULTS.compactionThreshold;
+  }
+  if (value <= 0 || value > 1) return DEFAULTS.compactionThreshold;
+  return value;
 }
 
 function loadConfig(): SupermemoryConfig {
@@ -91,6 +101,7 @@ export const CONFIG = {
     ...DEFAULT_KEYWORD_PATTERNS,
     ...(fileConfig.keywordPatterns ?? []).filter(isValidRegex),
   ],
+  compactionThreshold: validateCompactionThreshold(fileConfig.compactionThreshold),
 };
 
 export function isConfigured(): boolean {
