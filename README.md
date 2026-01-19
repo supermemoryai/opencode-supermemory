@@ -219,7 +219,10 @@ Create `~/.config/opencode/supermemory.jsonc`:
   "containerTagPrefix": "opencode",
   
   // Extra keyword patterns for memory detection (regex)
-  "keywordPatterns": ["log\\s+this", "write\\s+down"]
+  "keywordPatterns": ["log\\s+this", "write\\s+down"],
+  
+  // Context usage ratio that triggers compaction (0-1)
+  "compactionThreshold": 0.80
 }
 ```
 
