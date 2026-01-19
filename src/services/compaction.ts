@@ -11,8 +11,7 @@ const PART_STORAGE = join(homedir(), ".opencode", "parts");
 const DEFAULT_THRESHOLD = 0.80;
 const MIN_TOKENS_FOR_COMPACTION = 50_000;
 const COMPACTION_COOLDOWN_MS = 30_000;
-const CLAUDE_DEFAULT_CONTEXT_LIMIT = 200_000;
-const CLAUDE_MODEL_PATTERN = /claude-(opus|sonnet|haiku)/i;
+const DEFAULT_CONTEXT_LIMIT = 200_000;
 
 interface CompactionState {
   lastCompactionTime: Map<string, number>;
@@ -96,10 +95,6 @@ When summarizing this session, you MUST include the following sections in your s
 ${memoriesSection}
 This context is critical for maintaining continuity after compaction.
 `;
-}
-
-function isSupportedModel(modelID: string): boolean {
-  return CLAUDE_MODEL_PATTERN.test(modelID);
 }
 
 function getMessageDir(sessionID: string): string | null {
@@ -344,13 +339,8 @@ export function createCompactionHook(
     }
     agent = storedMessage?.agent;
 
-    if (!isSupportedModel(modelID)) {
-      log("[compaction] skipping unsupported model", { modelID });
-      return;
-    }
-
     const configLimit = getModelLimit?.(providerID, modelID);
-    const contextLimit = configLimit ?? CLAUDE_DEFAULT_CONTEXT_LIMIT;
+    const contextLimit = configLimit ?? DEFAULT_CONTEXT_LIMIT;
     const totalUsed = tokens.input + tokens.cache.read + tokens.output;
 
     if (totalUsed < MIN_TOKENS_FOR_COMPACTION) return;

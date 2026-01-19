@@ -46,9 +46,37 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
     log("Plugin disabled - SUPERMEMORY_API_KEY not set");
   }
 
+  // Fetch model limits once at plugin init
+  const modelLimits = new Map<string, number>();
+
+  (async () => {
+    try {
+      const response = await ctx.client.provider.list();
+      if (response.data?.all) {
+        for (const provider of response.data.all) {
+          if (provider.models) {
+            for (const [modelId, model] of Object.entries(provider.models)) {
+              if (model.limit?.context) {
+                modelLimits.set(`${provider.id}/${modelId}`, model.limit.context);
+              }
+            }
+          }
+        }
+      }
+      log("Model limits loaded", { count: modelLimits.size });
+    } catch (error) {
+      log("Failed to fetch model limits", { error: String(error) });
+    }
+  })();
+
+  const getModelLimit = (providerID: string, modelID: string): number | undefined => {
+    return modelLimits.get(`${providerID}/${modelID}`);
+  };
+
   const compactionHook = isConfigured() && ctx.client
     ? createCompactionHook(ctx as CompactionContext, tags, {
         threshold: CONFIG.compactionThreshold,
+        getModelLimit,
       })
     : null;
 
