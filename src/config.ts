@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { stripJsoncComments } from "./services/jsonc.js";
+import { loadCredentials } from "./services/auth.js";
 
 const CONFIG_DIR = join(homedir(), ".config", "opencode");
 const CONFIG_FILES = [
@@ -87,7 +88,14 @@ function loadConfig(): SupermemoryConfig {
 
 const fileConfig = loadConfig();
 
-export const SUPERMEMORY_API_KEY = fileConfig.apiKey ?? process.env.SUPERMEMORY_API_KEY;
+function getApiKey(): string | undefined {
+  // Priority: env var > config file > OAuth credentials
+  if (process.env.SUPERMEMORY_API_KEY) return process.env.SUPERMEMORY_API_KEY;
+  if (fileConfig.apiKey) return fileConfig.apiKey;
+  return loadCredentials()?.apiKey;
+}
+
+export const SUPERMEMORY_API_KEY = getApiKey();
 
 export const CONFIG = {
   similarityThreshold: fileConfig.similarityThreshold ?? DEFAULTS.similarityThreshold,

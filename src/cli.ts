@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import * as readline from "node:readline";
 import { stripJsoncComments } from "./services/jsonc.js";
+import { startAuthFlow, clearCredentials, loadCredentials } from "./services/auth.js";
 
 const OPENCODE_CONFIG_DIR = join(homedir(), ".config", "opencode");
 const OPENCODE_COMMAND_DIR = join(OPENCODE_CONFIG_DIR, "command");
@@ -162,6 +163,31 @@ Then ask: "I've initialized memory with X insights. Want me to continue refining
 6. Summarize what was learned and ask if user wants refinement
 `;
 
+const SUPERMEMORY_LOGIN_COMMAND = `---
+description: Authenticate with Supermemory via browser
+---
+
+# Supermemory Login
+
+Run this command to authenticate the user with Supermemory:
+
+\`\`\`bash
+bunx opencode-supermemory@latest login
+\`\`\`
+
+This will:
+1. Start a local server on port 19877
+2. Open the browser to Supermemory's authentication page
+3. After the user logs in, save credentials to ~/.supermemory-opencode/credentials.json
+
+Wait for the command to complete, then inform the user whether authentication succeeded or failed.
+
+If the user wants to log out instead, run:
+\`\`\`bash
+bunx opencode-supermemory@latest logout
+\`\`\`
+`;
+
 function createReadline(): readline.Interface {
   return readline.createInterface({
     input: process.stdin,
@@ -261,12 +287,17 @@ function createNewConfig(): boolean {
   return true;
 }
 
-function createCommand(): boolean {
+function createCommands(): boolean {
   mkdirSync(OPENCODE_COMMAND_DIR, { recursive: true });
-  const commandPath = join(OPENCODE_COMMAND_DIR, "supermemory-init.md");
 
-  writeFileSync(commandPath, SUPERMEMORY_INIT_COMMAND);
+  const initPath = join(OPENCODE_COMMAND_DIR, "supermemory-init.md");
+  writeFileSync(initPath, SUPERMEMORY_INIT_COMMAND);
   console.log(`✓ Created /supermemory-init command`);
+
+  const loginPath = join(OPENCODE_COMMAND_DIR, "supermemory-login.md");
+  writeFileSync(loginPath, SUPERMEMORY_LOGIN_COMMAND);
+  console.log(`✓ Created /supermemory-login command`);
+
   return true;
 }
 
@@ -357,17 +388,17 @@ async function install(options: InstallOptions): Promise<number> {
     }
   }
 
-  // Step 2: Create /supermemory-init command
-  console.log("\nStep 2: Create /supermemory-init command");
+  // Step 2: Create commands
+  console.log("\nStep 2: Create /supermemory-init and /supermemory-login commands");
   if (options.tui) {
-    const shouldCreate = await confirm(rl!, "Add /supermemory-init command?");
+    const shouldCreate = await confirm(rl!, "Add supermemory commands?");
     if (!shouldCreate) {
       console.log("Skipped.");
     } else {
-      createCommand();
+      createCommands();
     }
   } else {
-    createCommand();
+    createCommands();
   }
 
   // Step 3: Configure Oh My OpenCode (if installed)
@@ -394,19 +425,53 @@ async function install(options: InstallOptions): Promise<number> {
     }
   }
 
-  // Step 4: API key instructions
+  if (rl) rl.close();
+
+  // Step 4: Authenticate
   console.log("\n" + "─".repeat(50));
-  console.log("\n🔑 Final step: Set your API key\n");
-  console.log("Get your API key from: https://console.supermemory.ai");
-  console.log("\nThen add to your shell profile:\n");
+  console.log("\n🔑 Final step: Authenticate with Supermemory\n");
+
+  if (options.tui) {
+    return login();
+  }
+
+  // Non-interactive mode - print instructions
+  console.log("Run this command to authenticate:");
+  console.log("  bunx opencode-supermemory@latest login");
+  console.log("\nOr set your API key manually:");
   console.log('  export SUPERMEMORY_API_KEY="sm_..."');
-  console.log("\nOr create ~/.config/opencode/supermemory.jsonc:\n");
-  console.log('  { "apiKey": "sm_..." }');
   console.log("\n" + "─".repeat(50));
   console.log("\n✓ Setup complete! Restart OpenCode to activate.\n");
-
-  if (rl) rl.close();
   return 0;
+}
+
+async function login(): Promise<number> {
+  const existing = loadCredentials();
+  if (existing) {
+    console.log("Already authenticated. Use 'logout' first to re-authenticate.");
+    return 0;
+  }
+
+  const result = await startAuthFlow();
+
+  if (result.success) {
+    console.log("\n✓ Successfully authenticated with Supermemory!");
+    console.log("Restart OpenCode to activate.\n");
+    return 0;
+  } else {
+    console.error(`\n✗ Authentication failed: ${result.error}`);
+    return 1;
+  }
+}
+
+function logout(): number {
+  if (clearCredentials()) {
+    console.log("✓ Logged out. Credentials cleared.");
+    return 0;
+  } else {
+    console.log("No credentials found.");
+    return 0;
+  }
 }
 
 function printHelp(): void {
@@ -414,14 +479,16 @@ function printHelp(): void {
 opencode-supermemory - Persistent memory for OpenCode agents
 
 Commands:
-  install                    Install and configure the plugin
-    --no-tui                 Run in non-interactive mode (for LLM agents)
-    --disable-context-recovery   Disable Oh My OpenCode's context-window-limit-recovery hook (use with --no-tui)
+  install    Install and configure the plugin
+    --no-tui                     Non-interactive mode (for LLM agents)
+    --disable-context-recovery   Disable Oh My OpenCode's context hook
+  login      Authenticate with Supermemory (opens browser)
+  logout     Clear stored credentials
 
 Examples:
   bunx opencode-supermemory@latest install
-  bunx opencode-supermemory@latest install --no-tui
-  bunx opencode-supermemory@latest install --no-tui --disable-context-recovery
+  bunx opencode-supermemory@latest login
+  bunx opencode-supermemory@latest logout
 `);
 }
 
@@ -437,11 +504,14 @@ if (args[0] === "install") {
   const disableAutoCompact = args.includes("--disable-context-recovery");
   install({ tui: !noTui, disableAutoCompact }).then((code) => process.exit(code));
 } else if (args[0] === "setup") {
-  // Backwards compatibility
   console.log("Note: 'setup' is deprecated. Use 'install' instead.\n");
   const noTui = args.includes("--no-tui");
   const disableAutoCompact = args.includes("--disable-context-recovery");
   install({ tui: !noTui, disableAutoCompact }).then((code) => process.exit(code));
+} else if (args[0] === "login") {
+  login().then((code) => process.exit(code));
+} else if (args[0] === "logout") {
+  process.exit(logout());
 } else {
   console.error(`Unknown command: ${args[0]}`);
   printHelp();
