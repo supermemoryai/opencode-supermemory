@@ -6,7 +6,7 @@ import { supermemoryClient } from "./services/client.js";
 import { formatContextForPrompt } from "./services/context.js";
 import { getTags } from "./services/tags.js";
 import { stripPrivateContent, isFullyPrivate } from "./services/privacy.js";
-import { createCompactionHook, type CompactionContext } from "./services/compaction.js";
+import { createCompactionHook, generatePartId, type CompactionContext } from "./services/compaction.js";
 
 import { isConfigured, CONFIG } from "./config.js";
 import { log } from "./services/logger.js";
@@ -112,7 +112,7 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
         if (detectMemoryKeyword(userMessage)) {
           log("chat.message: memory keyword detected");
           const nudgePart: Part = {
-            id: `supermemory-nudge-${Date.now()}`,
+            id: generatePartId(),
             sessionID: input.sessionID,
             messageID: output.message.id,
             type: "text",
@@ -157,7 +157,7 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
 
           if (memoryContext) {
             const contextPart: Part = {
-              id: `supermemory-context-${Date.now()}`,
+              id: generatePartId(),
               sessionID: input.sessionID,
               messageID: output.message.id,
               type: "text",
