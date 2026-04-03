@@ -16,6 +16,25 @@ export function getGitEmail(): string | null {
 }
 
 /**
+ * Normalize a git remote URL to a canonical form so that SSH, HTTPS,
+ * and with/without `.git` suffix all produce the same identifier.
+ *
+ * Examples:
+ *   git@github.com:user/repo.git   → github.com/user/repo
+ *   https://github.com/user/repo   → github.com/user/repo
+ *   git@gitlab.com:org/sub/repo.git → gitlab.com/org/sub/repo
+ */
+export function normalizeGitUrl(url: string): string {
+  return url
+    .replace(/^[a-z+]+:\/\//, "")   // strip protocol (https://, git://, ssh://)
+    .replace(/^[^@]+@/, "")          // strip user@ prefix (git@, user@)
+    .replace(/:(\d+)\//, "/$1/")     // preserve port numbers (e.g. :8080/)
+    .replace(":", "/")               // SSH colon to slash (github.com:user → github.com/user)
+    .replace(/\.git$/, "")           // strip trailing .git
+    .replace(/\/+$/, "");            // strip trailing slashes
+}
+
+/**
  * Get the git remote URL for the given directory.
  * This provides a stable, cross-machine identifier for projects.
  * Returns null if not in a git repo or no remote configured.
@@ -58,7 +77,7 @@ export function getProjectTag(directory: string): string {
   // This allows the same project on different machines to share memories
   const remoteUrl = getGitRemoteUrl(directory);
   if (remoteUrl) {
-    return `${CONFIG.containerTagPrefix}_project_${sha256(remoteUrl)}`;
+    return `${CONFIG.containerTagPrefix}_project_${sha256(normalizeGitUrl(remoteUrl))}`;
   }
 
   // Fall back to directory path hash (machine-specific)
