@@ -15,6 +15,24 @@ export function getGitEmail(): string | null {
   }
 }
 
+/**
+ * Get the git remote URL for the given directory.
+ * This provides a stable, cross-machine identifier for projects.
+ * Returns null if not in a git repo or no remote configured.
+ */
+export function getGitRemoteUrl(directory: string): string | null {
+  try {
+    const remoteUrl = execSync("git config --get remote.origin.url", {
+      cwd: directory,
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim();
+    return remoteUrl || null;
+  } catch {
+    return null;
+  }
+}
+
 export function getUserTag(): string {
   // If userContainerTag is explicitly set, use it
   if (CONFIG.userContainerTag) {
@@ -36,7 +54,14 @@ export function getProjectTag(directory: string): string {
     return CONFIG.projectContainerTag;
   }
 
-  // Otherwise, auto-generate based on containerTagPrefix
+  // Try to use git remote URL as a stable cross-machine project identifier
+  // This allows the same project on different machines to share memories
+  const remoteUrl = getGitRemoteUrl(directory);
+  if (remoteUrl) {
+    return `${CONFIG.containerTagPrefix}_project_${sha256(remoteUrl)}`;
+  }
+
+  // Fall back to directory path hash (machine-specific)
   return `${CONFIG.containerTagPrefix}_project_${sha256(directory)}`;
 }
 
