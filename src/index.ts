@@ -141,7 +141,8 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
           const currentMemories = projectMemoriesListResult.success ? (projectMemoriesListResult.memories || []) : [];
           const legacyMemories = legacyProjectResult.success ? (legacyProjectResult.memories || []) : [];
           const seenIds = new Set(currentMemories.map((m: any) => m.id));
-          const mergedMemories = [...currentMemories, ...legacyMemories.filter((m: any) => !seenIds.has(m.id))];
+          const mergedMemories = [...currentMemories, ...legacyMemories.filter((m: any) => !seenIds.has(m.id))]
+            .slice(0, CONFIG.maxProjectMemories);
           const projectMemoriesList = { success: true, memories: mergedMemories };
 
           const projectMemories = {
@@ -449,7 +450,8 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
                 const currentMems = result.memories || [];
                 const legacyMems = legacyListResult.success ? (legacyListResult.memories || []) : [];
                 const listSeenIds = new Set(currentMems.map((m: any) => m.id));
-                const memories = [...currentMems, ...legacyMems.filter((m: any) => !listSeenIds.has(m.id))];
+                const memories = [...currentMems, ...legacyMems.filter((m: any) => !listSeenIds.has(m.id))]
+                  .slice(0, limit);
                 return JSON.stringify({
                   success: true,
                   scope,

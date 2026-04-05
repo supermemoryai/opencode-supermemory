@@ -271,7 +271,8 @@ export function createCompactionHook(
       const currentMems = result.memories || [];
       const legacyMems = legacyResult.success ? (legacyResult.memories || []) : [];
       const seenIds = new Set(currentMems.map((m: any) => m.id));
-      const allMemories = [...currentMems, ...legacyMems.filter((m: any) => !seenIds.has(m.id))];
+      const allMemories = [...currentMems, ...legacyMems.filter((m: any) => !seenIds.has(m.id))]
+        .slice(0, CONFIG.maxProjectMemories);
       return allMemories.map((m: any) => m.summary || m.content || "").filter(Boolean);
     } catch (err) {
       log("[compaction] failed to fetch project memories", { error: String(err) });
