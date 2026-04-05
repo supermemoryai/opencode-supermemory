@@ -248,7 +248,7 @@ export interface CompactionContext {
 
 export function createCompactionHook(
   ctx: CompactionContext,
-  tags: { user: string; project: string },
+  tags: { user: string; project: string; legacyProject?: string },
   options?: CompactionOptions
 ) {
   const state: CompactionState = {
@@ -262,9 +262,17 @@ export function createCompactionHook(
 
   async function fetchProjectMemoriesForCompaction(): Promise<string[]> {
     try {
-      const result = await supermemoryClient.listMemories(tags.project, CONFIG.maxProjectMemories);
-      const memories = result.memories || [];
-      return memories.map((m: any) => m.summary || m.content || "").filter(Boolean);
+      const [result, legacyResult] = await Promise.all([
+        supermemoryClient.listMemories(tags.project, CONFIG.maxProjectMemories),
+        tags.legacyProject
+          ? supermemoryClient.listMemories(tags.legacyProject, CONFIG.maxProjectMemories)
+          : Promise.resolve({ success: true, memories: [] } as const),
+      ]);
+      const currentMems = result.memories || [];
+      const legacyMems = legacyResult.success ? (legacyResult.memories || []) : [];
+      const seenIds = new Set(currentMems.map((m: any) => m.id));
+      const allMemories = [...currentMems, ...legacyMems.filter((m: any) => !seenIds.has(m.id))];
+      return allMemories.map((m: any) => m.summary || m.content || "").filter(Boolean);
     } catch (err) {
       log("[compaction] failed to fetch project memories", { error: String(err) });
       return [];

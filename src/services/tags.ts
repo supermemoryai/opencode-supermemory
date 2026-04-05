@@ -84,9 +84,26 @@ export function getProjectTag(directory: string): string {
   return `${CONFIG.containerTagPrefix}_project_${sha256(directory)}`;
 }
 
-export function getTags(directory: string): { user: string; project: string } {
+/**
+ * Returns the legacy directory-hash project tag if it differs from the
+ * current (remote-based) tag. Used to query old memories created before
+ * the git-remote-based tagging was introduced.
+ */
+export function getLegacyProjectTag(directory: string): string | undefined {
+  if (CONFIG.projectContainerTag) return undefined;
+
+  const remoteUrl = getGitRemoteUrl(directory);
+  if (!remoteUrl) return undefined;
+
+  // A remote exists, so the canonical tag is remote-based.
+  // Return the old directory-based tag for migration reads.
+  return `${CONFIG.containerTagPrefix}_project_${sha256(directory)}`;
+}
+
+export function getTags(directory: string): { user: string; project: string; legacyProject?: string } {
   return {
     user: getUserTag(),
     project: getProjectTag(directory),
+    legacyProject: getLegacyProjectTag(directory),
   };
 }

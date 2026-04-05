@@ -127,15 +127,22 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
         if (isFirstMessage) {
           injectedSessions.add(input.sessionID);
 
-          const [profileResult, userMemoriesResult, projectMemoriesListResult] = await Promise.all([
+          const [profileResult, userMemoriesResult, projectMemoriesListResult, legacyProjectResult] = await Promise.all([
             supermemoryClient.getProfile(tags.user, userMessage),
             supermemoryClient.searchMemories(userMessage, tags.user),
             supermemoryClient.listMemories(tags.project, CONFIG.maxProjectMemories),
+            tags.legacyProject
+              ? supermemoryClient.listMemories(tags.legacyProject, CONFIG.maxProjectMemories)
+              : Promise.resolve({ success: true, memories: [] } as const),
           ]);
 
           const profile = profileResult.success ? profileResult : null;
           const userMemories = userMemoriesResult.success ? userMemoriesResult : { results: [] };
-          const projectMemoriesList = projectMemoriesListResult.success ? projectMemoriesListResult : { memories: [] };
+          const currentMemories = projectMemoriesListResult.success ? (projectMemoriesListResult.memories || []) : [];
+          const legacyMemories = legacyProjectResult.success ? (legacyProjectResult.memories || []) : [];
+          const seenIds = new Set(currentMemories.map((m: any) => m.id));
+          const mergedMemories = [...currentMemories, ...legacyMemories.filter((m: any) => !seenIds.has(m.id))];
+          const projectMemoriesList = { success: true, memories: mergedMemories };
 
           const projectMemories = {
             results: (projectMemoriesList.memories || []).map((m: any) => ({
@@ -338,22 +345,28 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
                 }
 
                 if (scope === "project") {
-                  const result = await supermemoryClient.searchMemories(
-                    args.query,
-                    tags.project
-                  );
+                  const [result, legacyResult] = await Promise.all([
+                    supermemoryClient.searchMemories(args.query, tags.project),
+                    tags.legacyProject
+                      ? supermemoryClient.searchMemories(args.query, tags.legacyProject)
+                      : Promise.resolve({ success: true, results: [] } as const),
+                  ]);
                   if (!result.success) {
                     return JSON.stringify({
                       success: false,
                       error: result.error || "Failed to search memories",
                     });
                   }
-                  return formatSearchResults(args.query, scope, result, args.limit);
+                  const merged = mergeSearchResults(result, legacyResult);
+                  return formatSearchResults(args.query, scope, merged, args.limit);
                 }
 
-                const [userResult, projectResult] = await Promise.all([
+                const [userResult, projectResult, legacyProjectResult] = await Promise.all([
                   supermemoryClient.searchMemories(args.query, tags.user),
                   supermemoryClient.searchMemories(args.query, tags.project),
+                  tags.legacyProject
+                    ? supermemoryClient.searchMemories(args.query, tags.legacyProject)
+                    : Promise.resolve({ success: true, results: [] } as const),
                 ]);
 
                 if (!userResult.success || !projectResult.success) {
@@ -363,12 +376,14 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
                   });
                 }
 
+                const mergedProject = mergeSearchResults(projectResult, legacyProjectResult);
+
                 const combined = [
                   ...(userResult.results || []).map((r) => ({
                     ...r,
                     scope: "user" as const,
                   })),
-                  ...(projectResult.results || []).map((r) => ({
+                  ...(mergedProject.results || []).map((r) => ({
                     ...r,
                     scope: "project" as const,
                   })),
@@ -414,11 +429,15 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
                 const limit = args.limit || 20;
                 const containerTag =
                   scope === "user" ? tags.user : tags.project;
+                const legacyTag =
+                  scope === "project" ? tags.legacyProject : undefined;
 
-                const result = await supermemoryClient.listMemories(
-                  containerTag,
-                  limit
-                );
+                const [result, legacyListResult] = await Promise.all([
+                  supermemoryClient.listMemories(containerTag, limit),
+                  legacyTag
+                    ? supermemoryClient.listMemories(legacyTag, limit)
+                    : Promise.resolve({ success: true, memories: [] } as const),
+                ]);
 
                 if (!result.success) {
                   return JSON.stringify({
@@ -427,7 +446,10 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
                   });
                 }
 
-                const memories = result.memories || [];
+                const currentMems = result.memories || [];
+                const legacyMems = legacyListResult.success ? (legacyListResult.memories || []) : [];
+                const listSeenIds = new Set(currentMems.map((m: any) => m.id));
+                const memories = [...currentMems, ...legacyMems.filter((m: any) => !listSeenIds.has(m.id))];
                 return JSON.stringify({
                   success: true,
                   scope,
@@ -492,10 +514,23 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
   };
 };
 
+type SearchResult = { id: string; memory?: string; chunk?: string; similarity?: number };
+type SearchResponse = { success?: boolean; results?: SearchResult[] };
+
+function mergeSearchResults(primary: SearchResponse, legacy: SearchResponse): SearchResponse {
+  const primaryResults = primary.results || [];
+  const legacyResults = legacy.success ? (legacy.results || []) : [];
+  const seenIds = new Set(primaryResults.map((r) => r.id));
+  return {
+    ...primary,
+    results: [...primaryResults, ...legacyResults.filter((r) => !seenIds.has(r.id))],
+  };
+}
+
 function formatSearchResults(
   query: string,
   scope: string | undefined,
-  results: { results?: Array<{ id: string; memory?: string; chunk?: string; similarity?: number }> },
+  results: SearchResponse,
   limit?: number
 ): string {
   const memoryResults = results.results || [];
