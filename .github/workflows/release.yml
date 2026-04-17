@@ -1,24 +1,58 @@
-name: Release
+name: Publish Package
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - main
+    paths:
+      - "package.json"
 
 jobs:
-  release:
+  publish:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: oven-sh/setup-bun@v2
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          registry-url: "https://registry.npmjs.org"
 
-      - run: bun install
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
 
-      - run: bun run typecheck
+      - name: Install dependencies
+        run: bun install
 
-      - run: bun run build
+      - name: Check if version changed
+        id: version-check
+        run: |
+          PACKAGE_NAME=$(jq -r '.name' package.json)
+          LOCAL_VERSION=$(jq -r '.version' package.json)
+          NPM_VERSION=$(npm view "$PACKAGE_NAME" version 2>/dev/null || echo "0.0.0")
+          if [ "$LOCAL_VERSION" = "$NPM_VERSION" ]; then
+            echo "Version $LOCAL_VERSION already published, skipping."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Publishing $LOCAL_VERSION (npm has $NPM_VERSION)"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
 
-      - run: npm publish --access public
+      - name: Type check
+        if: steps.version-check.outputs.changed == 'true'
+        run: bun run typecheck
+
+      - name: Build
+        if: steps.version-check.outputs.changed == 'true'
+        run: bun run build
+
+      - name: Publish
+        if: steps.version-check.outputs.changed == 'true'
+        run: npm publish --access public
         env:
+          NPM_CONFIG_PROVENANCE: true
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
