@@ -1,14 +1,15 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { exec } from "node:child_process";
+import { execFile } from "node:child_process";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { homedir, hostname, platform, arch } from "node:os";
+import { randomBytes } from "node:crypto";
+import type { AddressInfo } from "node:net";
 
 const CREDENTIALS_DIR = join(homedir(), ".supermemory-opencode");
 const CREDENTIALS_FILE = join(CREDENTIALS_DIR, "credentials.json");
-const AUTH_PORT = 19877;
-const AUTH_BASE_URL = process.env.SUPERMEMORY_AUTH_URL || "https://app.supermemory.ai/auth/connect";
-const CLIENT_NAME = "opencode";
+const AUTH_BASE_URL = process.env.SUPERMEMORY_AUTH_URL || "https://console.supermemory.ai/auth/agent-connect";
+const AUTH_TIMEOUT = Number(process.env.SUPERMEMORY_AUTH_TIMEOUT) || 60_000;
 
 interface Credentials {
   apiKey: string;
@@ -41,18 +42,16 @@ export function clearCredentials(): boolean {
 }
 
 function openBrowser(url: string): void {
-  const platform = process.platform;
-
-  const commands: Record<string, string> = {
-    darwin: `open "${url}"`,
-    win32: `start "" "${url}"`,
-    linux: `xdg-open "${url}"`,
-  };
-
-  const cmd = commands[platform] ?? `xdg-open "${url}"`;
-  exec(cmd, (err) => {
+  const onError = (err: Error | null) => {
     if (err) console.error("Failed to open browser:", err.message);
-  });
+  };
+  if (process.platform === "win32") {
+    execFile("explorer.exe", [url], onError);
+  } else if (process.platform === "darwin") {
+    execFile("open", [url], onError);
+  } else {
+    execFile("xdg-open", [url], onError);
+  }
 }
 
 export interface AuthResult {
@@ -61,51 +60,39 @@ export interface AuthResult {
   error?: string;
 }
 
-export function startAuthFlow(timeoutMs = 120000): Promise<AuthResult> {
+export function startAuthFlow(): Promise<AuthResult> {
   return new Promise((resolve) => {
     let resolved = false;
+    const stateToken = randomBytes(16).toString("hex");
 
     const server = createServer((req: IncomingMessage, res: ServerResponse) => {
       if (resolved) return;
 
-      const url = new URL(req.url || "/", `http://localhost:${AUTH_PORT}`);
+      const url = new URL(req.url || "/", "http://localhost");
 
       if (url.pathname === "/callback") {
-        const apiKey = url.searchParams.get("apikey");
+        const callbackState = url.searchParams.get("state");
+        if (callbackState !== stateToken) {
+          res.writeHead(403, { "Content-Type": "text/html" });
+          res.end(errorHtml("Invalid state token"));
+          return;
+        }
 
-        if (apiKey) {
+        const apiKey = url.searchParams.get("apikey") || url.searchParams.get("api_key");
+
+        if (apiKey?.startsWith("sm_")) {
           saveCredentials(apiKey);
           res.writeHead(200, { "Content-Type": "text/html" });
-          res.end(`
-            <!DOCTYPE html>
-            <html>
-            <head><title>Success</title></head>
-            <body style="font-family: system-ui; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #0a0a0a; color: #fafafa;">
-              <div style="text-align: center;">
-                <h1 style="color: #22c55e;">✓ Connected!</h1>
-                <p>You can close this window and return to your terminal.</p>
-              </div>
-            </body>
-            </html>
-          `);
+          res.end(successHtml);
           resolved = true;
+          clearTimeout(timer);
           server.close();
           resolve({ success: true, apiKey });
         } else {
           res.writeHead(400, { "Content-Type": "text/html" });
-          res.end(`
-            <!DOCTYPE html>
-            <html>
-            <head><title>Error</title></head>
-            <body style="font-family: system-ui; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #0a0a0a; color: #fafafa;">
-              <div style="text-align: center;">
-                <h1 style="color: #ef4444;">✗ Connection Failed</h1>
-                <p>No API key received. Please try again.</p>
-              </div>
-            </body>
-            </html>
-          `);
+          res.end(errorHtml("No API key received"));
           resolved = true;
+          clearTimeout(timer);
           server.close();
           resolve({ success: false, error: "No API key received" });
         }
@@ -115,29 +102,63 @@ export function startAuthFlow(timeoutMs = 120000): Promise<AuthResult> {
       }
     });
 
-    server.on("error", (err: NodeJS.ErrnoException) => {
-      if (err.code === "EADDRINUSE") {
-        resolve({ success: false, error: `Port ${AUTH_PORT} is already in use` });
-      } else {
+    server.on("error", (err: Error) => {
+      if (!resolved) {
+        clearTimeout(timer);
         resolve({ success: false, error: err.message });
       }
     });
 
-    server.listen(AUTH_PORT, () => {
-      const callbackUrl = `http://localhost:${AUTH_PORT}/callback`;
-      const authUrl = `${AUTH_BASE_URL}?callback=${encodeURIComponent(callbackUrl)}&client=${CLIENT_NAME}`;
+    // Listen on an ephemeral port; embed state token in callback URL so the
+    // console redirects it back and the CSRF check passes.
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address() as AddressInfo;
+      const callbackUrl = `http://localhost:${port}/callback?state=${stateToken}`;
+      const params = new URLSearchParams({
+        callback: callbackUrl,
+        client: "opencode",
+        hostname: hostname(),
+        os: `${platform()}-${arch()}`,
+        cwd: process.cwd(),
+        cli_version: "1.0.0",
+      });
+      const authUrl = `${AUTH_BASE_URL}?${params.toString()}`;
 
       console.log("Opening browser for authentication...");
       console.log(`If it doesn't open, visit: ${authUrl}`);
       openBrowser(authUrl);
     });
 
-    setTimeout(() => {
+    const timer = setTimeout(() => {
       if (!resolved) {
         resolved = true;
         server.close();
         resolve({ success: false, error: "Authentication timed out" });
       }
-    }, timeoutMs);
+    }, AUTH_TIMEOUT);
   });
+}
+
+const successHtml = `<!DOCTYPE html>
+<html>
+<head><title>Success</title></head>
+<body style="font-family: system-ui; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #0a0a0a; color: #fafafa;">
+  <div style="text-align: center;">
+    <h1 style="color: #22c55e;">✓ Connected!</h1>
+    <p>You can close this window and return to your terminal.</p>
+  </div>
+</body>
+</html>`;
+
+function errorHtml(message: string): string {
+  return `<!DOCTYPE html>
+<html>
+<head><title>Error</title></head>
+<body style="font-family: system-ui; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #0a0a0a; color: #fafafa;">
+  <div style="text-align: center;">
+    <h1 style="color: #ef4444;">✗ Connection Failed</h1>
+    <p>${message}. Please try again.</p>
+  </div>
+</body>
+</html>`;
 }
