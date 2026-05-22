@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { stripJsoncComments } from "./services/jsonc.js";
@@ -23,6 +23,8 @@ interface SupermemoryConfig {
   filterPrompt?: string;
   keywordPatterns?: string[];
   compactionThreshold?: number;
+  autoRecallEveryPrompt?: boolean;
+  captureEveryNTurns?: number;
 }
 
 const DEFAULT_KEYWORD_PATTERNS = [
@@ -54,6 +56,8 @@ const DEFAULTS: Required<Omit<SupermemoryConfig, "apiKey" | "userContainerTag" |
   filterPrompt: "You are a stateful coding agent. Remember all the information, including but not limited to user's coding preferences, tech stack, behaviours, workflows, and any other relevant details.",
   keywordPatterns: [],
   compactionThreshold: 0.80,
+  autoRecallEveryPrompt: false,
+  captureEveryNTurns: 0,
 };
 
 function isValidRegex(pattern: string): boolean {
@@ -73,31 +77,31 @@ function validateCompactionThreshold(value: number | undefined): number {
   return value;
 }
 
-function loadConfig(): SupermemoryConfig {
+function loadRawConfig(): { config: SupermemoryConfig; existed: boolean } {
   for (const path of CONFIG_FILES) {
     if (existsSync(path)) {
       try {
         const content = readFileSync(path, "utf-8");
         const json = stripJsoncComments(content);
-        return JSON.parse(json) as SupermemoryConfig;
+        return { config: JSON.parse(json) as SupermemoryConfig, existed: true };
       } catch {
-        // Invalid config, use defaults
+        return { config: {}, existed: true };
       }
     }
   }
-  return {};
+  return { config: {}, existed: false };
 }
 
-const fileConfig = loadConfig();
+const { config: fileConfig, existed: configExisted } = loadRawConfig();
 
 function getApiKey(): string | undefined {
-  // Priority: env var > config file > OAuth credentials
   if (process.env.SUPERMEMORY_API_KEY) return process.env.SUPERMEMORY_API_KEY;
   if (fileConfig.apiKey) return fileConfig.apiKey;
   return loadCredentials()?.apiKey;
 }
 
 export const SUPERMEMORY_API_KEY = getApiKey();
+export const CONFIG_FILE = CONFIG_FILES[1];
 
 export const CONFIG = {
   similarityThreshold: fileConfig.similarityThreshold ?? DEFAULTS.similarityThreshold,
@@ -114,8 +118,27 @@ export const CONFIG = {
     ...(fileConfig.keywordPatterns ?? []).filter(isValidRegex),
   ],
   compactionThreshold: validateCompactionThreshold(fileConfig.compactionThreshold),
+  autoRecallEveryPrompt:
+    fileConfig.autoRecallEveryPrompt ??
+    (configExisted ? true : DEFAULTS.autoRecallEveryPrompt),
+  captureEveryNTurns:
+    fileConfig.captureEveryNTurns ??
+    (configExisted ? 3 : DEFAULTS.captureEveryNTurns),
 };
 
 export function isConfigured(): boolean {
   return !!SUPERMEMORY_API_KEY;
+}
+
+export function writeInstallDefaults(isExistingInstall: boolean): void {
+  const current = loadRawConfig().config;
+  const next: SupermemoryConfig = { ...current };
+  if (isExistingInstall) {
+    if (next.autoRecallEveryPrompt === undefined) next.autoRecallEveryPrompt = true;
+    if (next.captureEveryNTurns === undefined) next.captureEveryNTurns = 3;
+  } else {
+    next.autoRecallEveryPrompt = false;
+    next.captureEveryNTurns = 0;
+  }
+  writeFileSync(CONFIG_FILE, JSON.stringify(next, null, 2));
 }

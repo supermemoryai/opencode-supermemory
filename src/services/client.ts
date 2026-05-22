@@ -52,7 +52,12 @@ export class SupermemoryClient {
       if (!isConfigured()) {
         throw new Error("SUPERMEMORY_API_KEY not set");
       }
-      this.client = new Supermemory({ apiKey: SUPERMEMORY_API_KEY });
+      // `x-sm-source` is read by mono's API to attribute searches and
+      // writes to the OpenCode plugin in PostHog / `document.source`.
+      this.client = new Supermemory({
+        apiKey: SUPERMEMORY_API_KEY,
+        defaultHeaders: { "x-sm-source": "opencode" },
+      });
       this.client.settings.update({
 	     	shouldLLMFilter: true,
 	      filterPrompt: CONFIG.filterPrompt
@@ -109,11 +114,20 @@ export class SupermemoryClient {
   ) {
     log("addMemory: start", { containerTag, contentLength: content.length });
     try {
+      // Always stamp `sm_source` so mono's `document.source` column attributes
+      // these writes to the OpenCode plugin. Caller-provided metadata wins on
+      // conflicts.
+      const mergedMetadata = {
+        sm_source: "opencode",
+        sm_capture_mode: metadata?.sm_capture_mode ?? "tool",
+        ...(metadata ?? {}),
+      } as Record<string, string | number | boolean | string[]>;
+
       const result = await withTimeout(
         this.getClient().memories.add({
           content,
           containerTag,
-          metadata: metadata as Record<string, string | number | boolean | string[]>,
+          metadata: mergedMetadata,
         }),
         TIMEOUT_MS
       );

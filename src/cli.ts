@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import * as readline from "node:readline";
 import { stripJsoncComments } from "./services/jsonc.js";
 import { startAuthFlow, clearCredentials, loadCredentials } from "./services/auth.js";
+import { writeInstallDefaults, CONFIG_FILE } from "./config.js";
 
 const OPENCODE_CONFIG_DIR = join(homedir(), ".config", "opencode");
 const OPENCODE_COMMAND_DIR = join(OPENCODE_CONFIG_DIR, "command");
@@ -375,6 +376,8 @@ interface InstallOptions {
 
 async function install(options: InstallOptions): Promise<number> {
   console.log("\n🧠 opencode-supermemory installer\n");
+
+  writeInstallDefaults(existsSync(CONFIG_FILE));
 
   const rl = options.tui ? createReadline() : null;
 

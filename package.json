@@ -1,6 +1,6 @@
 {
   "name": "opencode-supermemory",
-  "version": "2.0.5",
+  "version": "2.0.6",
   "description": "OpenCode plugin that gives coding agents persistent memory using Supermemory",
   "type": "module",
   "main": "dist/index.js",

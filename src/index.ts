@@ -127,33 +127,41 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
         if (isFirstMessage) {
           injectedSessions.add(input.sessionID);
 
-          const [profileResult, userMemoriesResult, projectMemoriesListResult] = await Promise.all([
-            supermemoryClient.getProfile(tags.user, userMessage),
-            supermemoryClient.searchMemories(userMessage, tags.user),
-            supermemoryClient.listMemories(tags.project, CONFIG.maxProjectMemories),
-          ]);
+          let memoryContext = "";
 
-          const profile = profileResult.success ? profileResult : null;
-          const userMemories = userMemoriesResult.success ? userMemoriesResult : { results: [] };
-          const projectMemoriesList = projectMemoriesListResult.success ? projectMemoriesListResult : { memories: [] };
+          if (CONFIG.autoRecallEveryPrompt) {
+            const [profileResult, userMemoriesResult, projectMemoriesListResult] = await Promise.all([
+              supermemoryClient.getProfile(tags.user, userMessage),
+              supermemoryClient.searchMemories(userMessage, tags.user),
+              supermemoryClient.listMemories(tags.project, CONFIG.maxProjectMemories),
+            ]);
 
-          const projectMemories = {
-            results: (projectMemoriesList.memories || []).map((m: any) => ({
-              id: m.id,
-              memory: m.summary || m.content || m.title || "",
-              similarity: 1,
-              title: m.title,
-              metadata: m.metadata,
-            })),
-            total: projectMemoriesList.memories?.length || 0,
-            timing: 0,
-          };
+            const profile = profileResult.success ? profileResult : null;
+            const userMemories = userMemoriesResult.success ? userMemoriesResult : { results: [] };
+            const projectMemoriesList = projectMemoriesListResult.success ? projectMemoriesListResult : { memories: [] };
 
-          const memoryContext = formatContextForPrompt(
-            profile,
-            userMemories,
-            projectMemories
-          );
+            const projectMemories = {
+              results: (projectMemoriesList.memories || []).map((m: any) => ({
+                id: m.id,
+                memory: m.summary || m.content || m.title || "",
+                similarity: 1,
+                title: m.title,
+                metadata: m.metadata,
+              })),
+              total: projectMemoriesList.memories?.length || 0,
+              timing: 0,
+            };
+
+            memoryContext = formatContextForPrompt(
+              profile,
+              userMemories,
+              projectMemories
+            );
+          } else {
+            const profileResult = await supermemoryClient.getProfile(tags.user);
+            const profile = profileResult.success ? profileResult : null;
+            memoryContext = formatContextForPrompt(profile, { results: [] }, { results: [] });
+          }
 
           if (memoryContext) {
             const contextPart: Part = {
