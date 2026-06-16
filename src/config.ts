@@ -29,6 +29,7 @@ interface SupermemoryConfig {
   compactionThreshold?: number;
   autoRecallEveryPrompt?: boolean;
   captureEveryNTurns?: number;
+  recallDirective?: string | null;
 }
 
 const DEFAULT_KEYWORD_PATTERNS = [
@@ -50,7 +51,7 @@ const DEFAULT_KEYWORD_PATTERNS = [
   "always\\s+remember",
 ];
 
-const DEFAULTS: Required<Omit<SupermemoryConfig, "apiKey" | "baseUrl" | "userContainerTag" | "projectContainerTag">> = {
+const DEFAULTS: Required<Omit<SupermemoryConfig, "apiKey" | "baseUrl" | "userContainerTag" | "projectContainerTag" | "recallDirective">> = {
   similarityThreshold: 0.6,
   maxMemories: 5,
   maxProjectMemories: 10,
@@ -159,10 +160,21 @@ export const CONFIG = {
   captureEveryNTurns:
     fileConfig.captureEveryNTurns ??
     (configExisted ? 3 : DEFAULTS.captureEveryNTurns),
+  recallDirective: fileConfig.recallDirective ?? null,
 };
 
 export function isConfigured(): boolean {
   return !!SUPERMEMORY_API_KEY;
+}
+
+/**
+ * Resolve the reasoned-recall directive override. Reasoned recall is always on
+ * (a built-in optimization, not a toggle); the only knob is `recallDirective`,
+ * which overrides the directive text the model is shown each turn. Returns
+ * `{ directive: null }` to fall back to the built-in default in recall.ts.
+ */
+export function getRecallConfig(): { directive: string | null } {
+  return { directive: CONFIG.recallDirective ?? null };
 }
 
 export function writeInstallDefaults(isExistingInstall: boolean): void {
