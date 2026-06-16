@@ -1,5 +1,5 @@
 import type { Plugin, PluginInput } from "@opencode-ai/plugin";
-import type { Part } from "@opencode-ai/sdk";
+import type { Part, Permission } from "@opencode-ai/sdk";
 import { tool } from "@opencode-ai/plugin";
 
 import { supermemoryClient } from "./services/client.js";
@@ -41,6 +41,30 @@ function detectMemoryKeyword(text: string): boolean {
 
 function combineContextParts(parts: Array<string | null | undefined>): string {
   return parts.map((part) => part?.trim()).filter(Boolean).join("\n\n");
+}
+
+// Positively identify a permission request as the supermemory recall *search*
+// (a read-only memory lookup). The allow-list is deliberately narrow: only the
+// `supermemory` tool in `search` mode. Anything we can't positively match —
+// including the tool's own `add`/`forget` writes — returns false and falls
+// through to OpenCode's normal permission flow. We never use this to deny.
+function isSupermemoryRecallSearch(input: Permission): boolean {
+  const type = String((input as { type?: unknown }).type ?? "");
+  const title = String((input as { title?: unknown }).title ?? "").toLowerCase();
+  const metadata =
+    ((input as { metadata?: Record<string, unknown> }).metadata ?? {}) as Record<string, unknown>;
+
+  const toolName = String(metadata.tool ?? metadata.toolName ?? type);
+  const isSupermemory =
+    type === "supermemory" || toolName === "supermemory" || title.includes("supermemory");
+  if (!isSupermemory) return false;
+
+  // Tool args may live under a few keys depending on the permission shape.
+  const args = (metadata.args ?? metadata.input ?? metadata.arguments ?? metadata) as Record<
+    string,
+    unknown
+  >;
+  return String(args.mode ?? "") === "search";
 }
 
 export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
@@ -519,6 +543,24 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
           }
         },
       }),
+    },
+
+    "permission.ask": async (input, output) => {
+      // Auto-approve the reasoned recall search so it feels as silent as the
+      // save path. OpenCode usually doesn't prompt for plugin tools, so this is
+      // narrow defense-in-depth for users with strict `permission` config.
+      // We only ever set "allow" (never "deny") and only for the read-only
+      // supermemory search; everything else is left untouched.
+      if (!isConfigured()) return;
+      try {
+        if (isSupermemoryRecallSearch(input)) {
+          output.status = "allow";
+          log("permission.ask: auto-allowing supermemory recall search");
+        }
+      } catch (error) {
+        // Fail open — never block a tool call because our approve hook errored.
+        log("permission.ask: ERROR", { error: String(error) });
+      }
     },
 
     event: async (input: { event: { type: string; properties?: unknown } }) => {
