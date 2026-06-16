@@ -599,7 +599,8 @@ async function status(): Promise<number> {
   lines.push(`API key: ${maskKey(SUPERMEMORY_API_KEY)} (${getKeySource()})`);
   lines.push(`API URL: ${apiUrl}`);
   lines.push("Memory scope: current project + user profile");
-  lines.push(`Recall mode: ${CONFIG.autoRecallEveryPrompt ? "auto-recall on every prompt" : "session/event based"}`);
+  lines.push(`Recall mode: per-turn reasoned recall${CONFIG.autoRecallEveryPrompt ? " + eager session-start dump" : ""}`);
+  lines.push(`Recall directive: ${CONFIG.recallDirective ? "custom" : "default"}`);
   lines.push(`Capture cadence: ${CONFIG.captureEveryNTurns > 0 ? `every ${CONFIG.captureEveryNTurns} turn${CONFIG.captureEveryNTurns === 1 ? "" : "s"} + session end` : "session end only"}`);
   lines.push(`Project tag: ${tags.project}`);
   lines.push(`User tag: ${tags.user}`);

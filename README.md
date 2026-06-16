@@ -148,6 +148,17 @@ Relevant Memories:
 
 The agent uses this context automatically - no manual prompting needed.
 
+### Reasoned Recall
+
+On **every** turn, the agent is shown a short directive asking it to silently decide whether recalling saved memory would improve its answer to *this* message - and if so, to search before responding. The decision is the model's, per message:
+
+- **Recalls** when you refer to earlier work ("the auth flow", "like we did", "continue"), touch an area where saved conventions likely exist, or ask something past context would clarify.
+- **Skips** trivial, self-contained, greeting/meta, or already-answered messages.
+
+The search runs through the `supermemory` tool in `search` mode and is auto-approved, so it stays as silent as the save path. No network call happens until the model actually decides to recall.
+
+Customize the directive with the `recallDirective` config option. Set `SUPERMEMORY_DEBUG=1` to make the agent prefix each reply with one line - `[recall-decision] yes|no — <reason>` - so you can see when recall fires and why.
+
 ### Keyword Detection
 
 Say "remember", "save this", "don't forget" etc. and the agent auto-saves to memory.
@@ -245,6 +256,10 @@ Create `~/.config/opencode/supermemory.jsonc`:
 
   // Context usage ratio that triggers compaction (0-1)
   "compactionThreshold": 0.8,
+
+  // Override the reasoned-recall directive shown to the agent each turn
+  // (null or unset = built-in default)
+  "recallDirective": null,
 }
 ```
 
