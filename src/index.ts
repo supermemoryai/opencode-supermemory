@@ -4,6 +4,7 @@ import { tool } from "@opencode-ai/plugin";
 
 import { supermemoryClient } from "./services/client.js";
 import { formatContextForPrompt } from "./services/context.js";
+import { buildRecallDirective } from "./services/recall.js";
 import { getTags } from "./services/tags.js";
 import { stripPrivateContent, isFullyPrivate } from "./services/privacy.js";
 import { createCompactionHook, type CompactionContext } from "./services/compaction.js";
@@ -127,6 +128,20 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
           };
           output.parts.push(nudgePart);
         }
+
+        // Reasoned per-turn recall: inject the directive on every turn so the
+        // model silently decides whether searching saved memory helps THIS
+        // message (and, if so, calls the `supermemory` tool in `search` mode —
+        // auto-approved by the permission.ask hook below). No network call here.
+        const recallPart: Part = {
+          id: `prt_supermemory-recall-${Date.now()}`,
+          sessionID: input.sessionID,
+          messageID: output.message.id,
+          type: "text",
+          text: buildRecallDirective(),
+          synthetic: true,
+        };
+        output.parts.push(recallPart);
 
         const isFirstMessage = !injectedSessions.has(input.sessionID);
 
