@@ -4,7 +4,15 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import * as readline from "node:readline";
 import { stripJsoncComments } from "./services/jsonc.js";
-import { startAuthFlow, clearCredentials, loadCredentials, CREDENTIALS_FILE } from "./services/auth.js";
+import {
+  CREDENTIALS_FILE,
+  clearAuthAttempted,
+  clearCredentials,
+  clearLoggedOutMarker,
+  loadCredentials,
+  markLoggedOut,
+  startAuthFlow,
+} from "./services/auth.js";
 import { CONFIG, CONFIG_FILE, SUPERMEMORY_API_KEY, getApiBaseUrl, isConfigured, writeInstallDefaults } from "./config.js";
 import { SupermemoryClient } from "./services/client.js";
 import { getTags } from "./services/tags.js";
@@ -497,6 +505,8 @@ async function login(): Promise<number> {
     return 0;
   }
 
+  clearAuthAttempted();
+  clearLoggedOutMarker();
   const result = await startAuthFlow();
 
   if (result.success) {
@@ -643,6 +653,7 @@ async function status(): Promise<number> {
 }
 
 function logout(): number {
+  markLoggedOut();
   if (clearCredentials()) {
     console.log("✓ Logged out. Credentials cleared.");
     console.log("This only logs out this local OpenCode install. To revoke the account-level OpenCode integration key, disconnect it from the Supermemory integrations page.");

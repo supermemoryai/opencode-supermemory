@@ -104,7 +104,11 @@ function getApiKey(): string | undefined {
   return loadCredentials()?.apiKey;
 }
 
-export const SUPERMEMORY_API_KEY = getApiKey();
+export let SUPERMEMORY_API_KEY = getApiKey();
+
+export function reloadApiKey(): void {
+  SUPERMEMORY_API_KEY = getApiKey();
+}
 
 function normalizeBaseUrl(baseUrl: unknown): string | null {
   if (typeof baseUrl !== "string" || !baseUrl.trim()) return null;

@@ -12,9 +12,16 @@ import { getTags } from "./services/tags.js";
 import { stripPrivateContent, isFullyPrivate } from "./services/privacy.js";
 import { createCompactionHook, type CompactionContext } from "./services/compaction.js";
 
-import { isConfigured, CONFIG, PLUGIN_VERSION } from "./config.js";
+import { isConfigured, CONFIG, PLUGIN_VERSION, reloadApiKey } from "./config.js";
 import { log } from "./services/logger.js";
 import { checkNpmUpdate, formatUpdateNotice } from "./services/version-check.js";
+import {
+  clearAuthAttempted,
+  hasAuthAttempted,
+  isLoggedOut,
+  markAuthAttempted,
+  startAuthFlow,
+} from "./services/auth.js";
 import type { MemoryScope, MemoryType } from "./types/index.js";
 
 const CODE_BLOCK_PATTERN = /```[\s\S]*?```/g;
@@ -83,16 +90,76 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
     return modelLimits.get(`${providerID}/${modelID}`);
   };
 
-  const compactionHook = isConfigured() && ctx.client
+  let compactionHook = isConfigured() && ctx.client
     ? createCompactionHook(ctx as CompactionContext, tags, {
         threshold: CONFIG.compactionThreshold,
         getModelLimit,
       })
     : null;
+  let authAttempt: Promise<boolean> | null = null;
+
+  const ensureAuthenticated = async (): Promise<boolean> => {
+    if (isConfigured()) return true;
+    if (isLoggedOut() || hasAuthAttempted()) return false;
+
+    authAttempt ??= (async () => {
+      try {
+        markAuthAttempted();
+        const result = await startAuthFlow();
+        if (!result.success) {
+          log("Browser auth failed", { error: result.error });
+          return false;
+        }
+
+        reloadApiKey();
+        clearAuthAttempted();
+        if (!compactionHook && ctx.client) {
+          compactionHook = createCompactionHook(ctx as CompactionContext, tags, {
+            threshold: CONFIG.compactionThreshold,
+            getModelLimit,
+          });
+        }
+        log("Browser auth complete");
+        return isConfigured();
+      } catch (error) {
+        log("Browser auth error", { error: String(error) });
+        return false;
+      } finally {
+        authAttempt = null;
+      }
+    })();
+
+    return authAttempt;
+  };
+
+  const addAuthNotice = (
+    input: { sessionID: string },
+    output: { message: { id: string }; parts: Part[] },
+    message: string
+  ): void => {
+    output.parts.unshift({
+      id: `prt_supermemory-auth-${Date.now()}`,
+      sessionID: input.sessionID,
+      messageID: output.message.id,
+      type: "text",
+      text: message,
+      synthetic: true,
+    });
+  };
 
   return {
     "chat.message": async (input, output) => {
-      if (!isConfigured()) return;
+      if (!isConfigured()) {
+        const authenticated = await ensureAuthenticated();
+        if (!authenticated) {
+          addAuthNotice(
+            input,
+            output,
+            "[SUPERMEMORY] Memory is installed but not active yet. Complete browser authentication, run /supermemory-login, or set SUPERMEMORY_API_KEY."
+          );
+          return;
+        }
+      }
 
       const start = Date.now();
 

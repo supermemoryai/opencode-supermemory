@@ -8,6 +8,8 @@ import { openUrl } from "./openUrl.js";
 
 const CREDENTIALS_DIR = join(homedir(), ".supermemory-opencode");
 export const CREDENTIALS_FILE = join(CREDENTIALS_DIR, "credentials.json");
+const AUTH_ATTEMPTED_FILE = join(CREDENTIALS_DIR, ".auth-attempted");
+const LOGGED_OUT_FILE = join(CREDENTIALS_DIR, ".logged-out");
 const AUTH_BASE_URL = process.env.SUPERMEMORY_AUTH_URL || "https://app.supermemory.ai/auth/agent-connect";
 const AUTH_TIMEOUT = Number(process.env.SUPERMEMORY_AUTH_TIMEOUT) || 5 * 60_000;
 const CLIENT_NAME = "opencode";
@@ -51,12 +53,41 @@ export function saveCredentials(apiKey: string, apiBaseUrl?: string): void {
   const normalizedApiBaseUrl = normalizeApiBaseUrl(apiBaseUrl);
   if (normalizedApiBaseUrl) credentials.apiBaseUrl = normalizedApiBaseUrl;
   writeFileSync(CREDENTIALS_FILE, JSON.stringify(credentials, null, 2), { mode: 0o600 });
+  clearAuthAttempted();
+  clearLoggedOutMarker();
 }
 
 export function clearCredentials(): boolean {
   if (!existsSync(CREDENTIALS_FILE)) return false;
   rmSync(CREDENTIALS_FILE);
   return true;
+}
+
+export function hasAuthAttempted(): boolean {
+  return existsSync(AUTH_ATTEMPTED_FILE);
+}
+
+export function markAuthAttempted(): void {
+  mkdirSync(CREDENTIALS_DIR, { recursive: true, mode: 0o700 });
+  writeFileSync(AUTH_ATTEMPTED_FILE, new Date().toISOString());
+}
+
+export function clearAuthAttempted(): void {
+  if (existsSync(AUTH_ATTEMPTED_FILE)) rmSync(AUTH_ATTEMPTED_FILE);
+}
+
+export function isLoggedOut(): boolean {
+  return existsSync(LOGGED_OUT_FILE);
+}
+
+export function markLoggedOut(): void {
+  mkdirSync(CREDENTIALS_DIR, { recursive: true, mode: 0o700 });
+  writeFileSync(LOGGED_OUT_FILE, new Date().toISOString());
+  clearAuthAttempted();
+}
+
+export function clearLoggedOutMarker(): void {
+  if (existsSync(LOGGED_OUT_FILE)) rmSync(LOGGED_OUT_FILE);
 }
 
 export interface AuthResult {
