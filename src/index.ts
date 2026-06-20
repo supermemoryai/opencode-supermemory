@@ -5,8 +5,8 @@ import { tool } from "@opencode-ai/plugin";
 import {
   PROJECT_ENTITY_CONTEXT,
   USER_ENTITY_CONTEXT,
-  supermemoryClient,
-} from "./services/client.js";
+} from "./services/entity-context.js";
+import { supermemoryClient } from "./services/client.js";
 import { formatContextForPrompt } from "./services/context.js";
 import { getTags } from "./services/tags.js";
 import { stripPrivateContent, isFullyPrivate } from "./services/privacy.js";

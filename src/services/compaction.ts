@@ -1,7 +1,8 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { PROJECT_ENTITY_CONTEXT, supermemoryClient } from "./client.js";
+import { PROJECT_ENTITY_CONTEXT } from "./entity-context.js";
+import { supermemoryClient } from "./client.js";
 import { log } from "./logger.js";
 import { CONFIG } from "../config.js";
 
