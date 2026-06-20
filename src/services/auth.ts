@@ -193,7 +193,7 @@ export function startAuthFlow(timeoutMs = AUTH_TIMEOUT): Promise<AuthResult> {
         hostname: `opencode - ${hostname()}`,
         os: `${platform()}-${arch()}`,
         cwd: process.cwd(),
-        cli_version: "2.0.6",
+        cli_version: "2.0.8",
       });
       const authUrl = `${AUTH_BASE_URL}?${params.toString()}`;
 
