@@ -4,6 +4,7 @@
  * Also removes trailing commas to support more relaxed JSONC format.
  */
 export function stripJsoncComments(content: string): string {
+  content = content.replace(/^\uFEFF/, "");
   let result = "";
   let i = 0;
   let inString = false;

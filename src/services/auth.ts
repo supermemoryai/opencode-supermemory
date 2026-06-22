@@ -65,10 +65,19 @@ export interface AuthResult {
   error?: string;
 }
 
-export function startAuthFlow(timeoutMs = AUTH_TIMEOUT): Promise<AuthResult> {
-  return new Promise((resolve) => {
+export interface AuthSession {
+  authUrl: string;
+  callback: () => Promise<AuthResult>;
+}
+
+export function createAuthSession(timeoutMs = AUTH_TIMEOUT): Promise<AuthSession> {
+  return new Promise((resolveSession) => {
     let resolved = false;
     const stateToken = randomBytes(16).toString("hex");
+    let resolveAuth: (result: AuthResult) => void;
+    const result = new Promise<AuthResult>((resolve) => {
+      resolveAuth = resolve;
+    });
 
     const server = createServer((req: IncomingMessage, res: ServerResponse) => {
       if (resolved) return;
@@ -94,7 +103,7 @@ export function startAuthFlow(timeoutMs = AUTH_TIMEOUT): Promise<AuthResult> {
           resolved = true;
           clearTimeout(timer);
           server.close();
-          resolve({ success: false, error: "Invalid auth state" });
+          resolveAuth({ success: false, error: "Invalid auth state" });
           return;
         }
 
@@ -119,7 +128,7 @@ export function startAuthFlow(timeoutMs = AUTH_TIMEOUT): Promise<AuthResult> {
           resolved = true;
           clearTimeout(timer);
           server.close();
-          resolve({ success: true, apiKey });
+          resolveAuth({ success: true, apiKey });
         } else {
           res.writeHead(400, { "Content-Type": "text/html" });
           res.end(`
@@ -137,7 +146,7 @@ export function startAuthFlow(timeoutMs = AUTH_TIMEOUT): Promise<AuthResult> {
           resolved = true;
           clearTimeout(timer);
           server.close();
-          resolve({ success: false, error: "No API key received" });
+          resolveAuth({ success: false, error: "No API key received" });
         }
       } else {
         res.writeHead(404);
@@ -149,7 +158,7 @@ export function startAuthFlow(timeoutMs = AUTH_TIMEOUT): Promise<AuthResult> {
       if (!resolved) {
         resolved = true;
         clearTimeout(timer);
-        resolve({ success: false, error: err.message });
+        resolveAuth({ success: false, error: err.message });
       }
     });
 
@@ -166,15 +175,9 @@ export function startAuthFlow(timeoutMs = AUTH_TIMEOUT): Promise<AuthResult> {
       });
       const authUrl = `${AUTH_BASE_URL}?${params.toString()}`;
 
-      console.log("Opening browser for authentication...");
-      console.log(`If it doesn't open, visit: ${authUrl}`);
-      openUrl(authUrl).catch((error) => {
-        if (!resolved) {
-          resolved = true;
-          clearTimeout(timer);
-          server.close();
-          resolve({ success: false, error: `Failed to open browser: ${error.message}` });
-        }
+      resolveSession({
+        authUrl,
+        callback: () => result,
       });
     });
 
@@ -182,8 +185,18 @@ export function startAuthFlow(timeoutMs = AUTH_TIMEOUT): Promise<AuthResult> {
       if (!resolved) {
         resolved = true;
         server.close();
-        resolve({ success: false, error: "Authentication timed out" });
+        resolveAuth({ success: false, error: "Authentication timed out" });
       }
     }, timeoutMs);
   });
+}
+
+export async function startAuthFlow(timeoutMs = AUTH_TIMEOUT): Promise<AuthResult> {
+  const session = await createAuthSession(timeoutMs);
+  console.log("Opening browser for authentication...");
+  console.log(`If it doesn't open, visit: ${session.authUrl}`);
+  openUrl(session.authUrl).catch((error) => {
+    console.error(`Failed to open browser: ${error.message}`);
+  });
+  return session.callback();
 }

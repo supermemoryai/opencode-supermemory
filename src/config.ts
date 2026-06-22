@@ -5,7 +5,7 @@ import { stripJsoncComments } from "./services/jsonc.js";
 import { loadCredentials } from "./services/auth.js";
 
 const CONFIG_DIR = join(homedir(), ".config", "opencode");
-export const PLUGIN_VERSION = "2.0.7";
+export const PLUGIN_VERSION = "2.0.8";
 const CONFIG_FILES = [
   join(CONFIG_DIR, "supermemory.jsonc"),
   join(CONFIG_DIR, "supermemory.json"),
@@ -104,7 +104,11 @@ function getApiKey(): string | undefined {
   return loadCredentials()?.apiKey;
 }
 
-export const SUPERMEMORY_API_KEY = getApiKey();
+export let SUPERMEMORY_API_KEY = getApiKey();
+
+export function reloadApiKey(): void {
+  SUPERMEMORY_API_KEY = getApiKey();
+}
 
 function normalizeBaseUrl(baseUrl: unknown): string | null {
   if (typeof baseUrl !== "string" || !baseUrl.trim()) return null;

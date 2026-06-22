@@ -8,9 +8,11 @@ import { getTags } from "./services/tags.js";
 import { stripPrivateContent, isFullyPrivate } from "./services/privacy.js";
 import { createCompactionHook, type CompactionContext } from "./services/compaction.js";
 
-import { isConfigured, CONFIG, PLUGIN_VERSION } from "./config.js";
+import { isConfigured, CONFIG, PLUGIN_VERSION, reloadApiKey } from "./config.js";
 import { log } from "./services/logger.js";
 import { checkNpmUpdate, formatUpdateNotice } from "./services/version-check.js";
+import { createAuthSession } from "./services/auth.js";
+import { openUrl } from "./services/openUrl.js";
 import type { MemoryScope, MemoryType } from "./types/index.js";
 
 const CODE_BLOCK_PATTERN = /```[\s\S]*?```/g;
@@ -46,6 +48,7 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
   const { directory } = ctx;
   const tags = getTags(directory);
   const injectedSessions = new Set<string>();
+  let authFlowStarted = false;
   log("Plugin init", { directory, tags, configured: isConfigured() });
 
   if (!isConfigured()) {
@@ -86,9 +89,83 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
       })
     : null;
 
+
+  async function startAuthFallback(): Promise<string | null> {
+    if (isConfigured() || authFlowStarted) return null;
+    authFlowStarted = true;
+
+    try {
+      const session = await createAuthSession();
+      openUrl(session.authUrl).catch((error) => {
+        log("OpenCode auth fallback failed to open browser", { error: String(error) });
+      });
+
+      session.callback().then((result) => {
+        if (result.success && result.apiKey) {
+          reloadApiKey();
+          log("OpenCode auth fallback completed");
+        } else {
+          log("OpenCode auth fallback failed", { error: result.error });
+        }
+      });
+      return session.authUrl;
+    } catch (error) {
+      log("OpenCode auth fallback failed to start", { error: String(error) });
+      return null;
+    }
+  }
+
   return {
+    auth: !isConfigured()
+      ? {
+          provider: "supermemory",
+          methods: [
+            {
+              type: "oauth",
+              label: "Connect Supermemory",
+              async authorize() {
+                const session = await createAuthSession();
+                return {
+                  url: session.authUrl,
+                  instructions:
+                    "Connect Supermemory to enable persistent memory in OpenCode. Complete login in the browser window, then return to OpenCode.",
+                  method: "auto" as const,
+                  async callback() {
+                    const result = await session.callback();
+                    if (!result.success || !result.apiKey) {
+                      return { type: "failed" as const };
+                    }
+
+                    reloadApiKey();
+                    log("OpenCode auth hook completed");
+                    return {
+                      type: "success" as const,
+                      provider: "supermemory",
+                      key: result.apiKey,
+                    };
+                  },
+                };
+              },
+            },
+          ],
+        }
+      : undefined,
+
     "chat.message": async (input, output) => {
-      if (!isConfigured()) return;
+      if (!isConfigured()) {
+        const authUrl = await startAuthFallback();
+        const loginPart: Part = {
+          id: `prt_supermemory-auth-${Date.now()}`,
+          sessionID: input.sessionID,
+          messageID: output.message.id,
+          type: "text",
+          text:
+            `[SUPERMEMORY] Supermemory is installed but not connected. I opened the login page in your browser. Complete login there, then continue in OpenCode. If the browser did not open, use this link: ${authUrl ?? "run /supermemory-login"}.`,
+          synthetic: true,
+        };
+        output.parts.unshift(loginPart);
+        return;
+      }
 
       const start = Date.now();
 
