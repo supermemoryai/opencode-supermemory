@@ -167,12 +167,6 @@ export function isConfigured(): boolean {
   return !!SUPERMEMORY_API_KEY;
 }
 
-/**
- * Resolve the reasoned-recall directive override. Reasoned recall is always on
- * (a built-in optimization, not a toggle); the only knob is `recallDirective`,
- * which overrides the directive text the model is shown each turn. Returns
- * `{ directive: null }` to fall back to the built-in default in recall.ts.
- */
 export function getRecallConfig(): { directive: string | null } {
   return { directive: CONFIG.recallDirective ?? null };
 }

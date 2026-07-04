@@ -43,11 +43,6 @@ function combineContextParts(parts: Array<string | null | undefined>): string {
   return parts.map((part) => part?.trim()).filter(Boolean).join("\n\n");
 }
 
-// Positively identify a permission request as the supermemory recall *search*
-// (a read-only memory lookup). The allow-list is deliberately narrow: only the
-// `supermemory` tool in `search` mode. Anything we can't positively match —
-// including the tool's own `add`/`forget` writes — returns false and falls
-// through to OpenCode's normal permission flow. We never use this to deny.
 function isSupermemoryRecallSearch(input: Permission): boolean {
   const type = String((input as { type?: unknown }).type ?? "");
   const title = String((input as { title?: unknown }).title ?? "").toLowerCase();
@@ -59,7 +54,6 @@ function isSupermemoryRecallSearch(input: Permission): boolean {
     type === "supermemory" || toolName === "supermemory" || title.includes("supermemory");
   if (!isSupermemory) return false;
 
-  // Tool args may live under a few keys depending on the permission shape.
   const args = (metadata.args ?? metadata.input ?? metadata.arguments ?? metadata) as Record<
     string,
     unknown
@@ -153,10 +147,6 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
           output.parts.push(nudgePart);
         }
 
-        // Reasoned per-turn recall: inject the directive on every turn so the
-        // model silently decides whether searching saved memory helps THIS
-        // message (and, if so, calls the `supermemory` tool in `search` mode —
-        // auto-approved by the permission.ask hook below). No network call here.
         const recallPart: Part = {
           id: `prt_supermemory-recall-${Date.now()}`,
           sessionID: input.sessionID,
@@ -546,11 +536,6 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
     },
 
     "permission.ask": async (input, output) => {
-      // Auto-approve the reasoned recall search so it feels as silent as the
-      // save path. OpenCode usually doesn't prompt for plugin tools, so this is
-      // narrow defense-in-depth for users with strict `permission` config.
-      // We only ever set "allow" (never "deny") and only for the read-only
-      // supermemory search; everything else is left untouched.
       if (!isConfigured()) return;
       try {
         if (isSupermemoryRecallSearch(input)) {
@@ -558,7 +543,6 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
           log("permission.ask: auto-allowing supermemory recall search");
         }
       } catch (error) {
-        // Fail open — never block a tool call because our approve hook errored.
         log("permission.ask: ERROR", { error: String(error) });
       }
     },
