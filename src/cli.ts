@@ -13,7 +13,6 @@ const OPENCODE_CONFIG_DIR = join(homedir(), ".config", "opencode");
 const OPENCODE_COMMAND_DIR = join(OPENCODE_CONFIG_DIR, "command");
 const OH_MY_OPENCODE_CONFIG = join(OPENCODE_CONFIG_DIR, "oh-my-opencode.json");
 const PLUGIN_NAME = "opencode-supermemory@latest";
-const DEFAULT_CONFIG_FILE = CONFIG_FILE ?? join(OPENCODE_CONFIG_DIR, "supermemory.json");
 
 const SUPERMEMORY_INIT_COMMAND = `---
 description: Initialize Supermemory with comprehensive codebase knowledge
@@ -401,7 +400,13 @@ interface InstallOptions {
 async function install(options: InstallOptions): Promise<number> {
   console.log("\n🧠 opencode-supermemory installer\n");
 
-  writeInstallDefaults(existsSync(DEFAULT_CONFIG_FILE));
+  try {
+    writeInstallDefaults(existsSync(CONFIG_FILE));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`✗ ${message}`);
+    return 1;
+  }
 
   const rl = options.tui ? createReadline() : null;
 
@@ -517,8 +522,8 @@ function maskKey(key: string | undefined): string {
 
 function getConfiguredApiKeyFromFile(): string | undefined {
   try {
-    if (!existsSync(DEFAULT_CONFIG_FILE)) return undefined;
-    const parsed = JSON.parse(readFileSync(DEFAULT_CONFIG_FILE, "utf-8")) as { apiKey?: string };
+    if (!existsSync(CONFIG_FILE)) return undefined;
+    const parsed = JSON.parse(stripJsoncComments(readFileSync(CONFIG_FILE, "utf-8"))) as { apiKey?: string };
     return parsed.apiKey;
   } catch {
     return undefined;
@@ -527,7 +532,7 @@ function getConfiguredApiKeyFromFile(): string | undefined {
 
 function getKeySource(): string {
   if (process.env.SUPERMEMORY_API_KEY) return "SUPERMEMORY_API_KEY env var";
-  if (getConfiguredApiKeyFromFile()) return DEFAULT_CONFIG_FILE;
+  if (getConfiguredApiKeyFromFile()) return CONFIG_FILE;
   if (loadCredentials()) return CREDENTIALS_FILE;
   return "not configured";
 }

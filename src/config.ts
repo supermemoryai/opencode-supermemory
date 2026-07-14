@@ -1,15 +1,20 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { isDeepStrictEqual } from "node:util";
 import { stripJsoncComments } from "./services/jsonc.js";
 import { loadCredentials } from "./services/auth.js";
 
 const CONFIG_DIR = join(homedir(), ".config", "opencode");
 export const PLUGIN_VERSION = "2.0.8";
-const CONFIG_FILES = [
-  join(CONFIG_DIR, "supermemory.jsonc"),
-  join(CONFIG_DIR, "supermemory.json"),
-];
+
+function resolveConfigFile(configDir = CONFIG_DIR): string {
+  const jsoncFile = join(configDir, "supermemory.jsonc");
+  const jsonFile = join(configDir, "supermemory.json");
+  return [jsoncFile, jsonFile].find((path) => existsSync(path)) ?? jsonFile;
+}
+
+export const CONFIG_FILE = resolveConfigFile();
 
 export const DEFAULT_BASE_URL = "https://api.supermemory.ai";
 
@@ -81,19 +86,137 @@ function validateCompactionThreshold(value: number | undefined): number {
   return value;
 }
 
-function loadRawConfig(): { config: SupermemoryConfig; existed: boolean } {
-  for (const path of CONFIG_FILES) {
-    if (existsSync(path)) {
-      try {
-        const content = readFileSync(path, "utf-8");
-        const json = stripJsoncComments(content);
-        return { config: JSON.parse(json) as SupermemoryConfig, existed: true };
-      } catch {
-        return { config: {}, existed: true };
-      }
+interface RawConfigResult {
+  config: SupermemoryConfig;
+  existed: boolean;
+  content?: string;
+  parseError?: string;
+}
+
+function isJsonWhitespace(char: string): boolean {
+  return char === " " || char === "\t" || char === "\r" || char === "\n";
+}
+
+function findJsoncObjectStart(content: string): number {
+  let inLineComment = false;
+  let inBlockComment = false;
+
+  for (let i = 0; i < content.length; i++) {
+    const char = content[i] ?? "";
+    const next = content[i + 1] ?? "";
+
+    if (inLineComment) {
+      if (char === "\n") inLineComment = false;
+      continue;
     }
+
+    if (inBlockComment) {
+      if (char === "*" && next === "/") {
+        inBlockComment = false;
+        i++;
+      }
+      continue;
+    }
+
+    if (char === "/" && next === "/") {
+      inLineComment = true;
+      i++;
+      continue;
+    }
+
+    if (char === "/" && next === "*") {
+      inBlockComment = true;
+      i++;
+      continue;
+    }
+
+    if (isJsonWhitespace(char)) continue;
+    if (char === "{") return i;
+    throw new Error("Cannot update Supermemory JSONC config: expected a top-level object");
   }
-  return { config: {}, existed: false };
+
+  throw new Error("Cannot update Supermemory JSONC config: expected a top-level object");
+}
+
+function inferJsoncPropertyIndent(content: string, start: number): string {
+  let lineStart = start;
+
+  while (lineStart < content.length) {
+    let contentStart = lineStart;
+    while (content[contentStart] === " " || content[contentStart] === "\t") contentStart++;
+
+    if (content.startsWith("\r\n", contentStart)) {
+      lineStart = contentStart + 2;
+      continue;
+    }
+    if (content[contentStart] === "\r" || content[contentStart] === "\n") {
+      lineStart = contentStart + 1;
+      continue;
+    }
+
+    const indent = content.slice(lineStart, contentStart);
+    return content[contentStart] === "}" ? `${indent}  ` : indent;
+  }
+
+  return "  ";
+}
+
+function insertJsoncProperties(
+  content: string,
+  entries: Array<readonly [key: string, value: boolean | number]>,
+  hasExistingProperties: boolean,
+): string {
+  if (entries.length === 0) return content;
+
+  const objectStart = findJsoncObjectStart(content);
+  const renderedEntries = entries.map(([key, value], index) => {
+    const needsComma = hasExistingProperties || index < entries.length - 1;
+    return `${JSON.stringify(key)}: ${JSON.stringify(value)}${needsComma ? "," : ""}`;
+  });
+
+  let lineBreakStart = objectStart + 1;
+  while (content[lineBreakStart] === " " || content[lineBreakStart] === "\t") {
+    lineBreakStart++;
+  }
+
+  const lineBreakLength = content.startsWith("\r\n", lineBreakStart)
+    ? 2
+    : content[lineBreakStart] === "\r" || content[lineBreakStart] === "\n"
+      ? 1
+      : 0;
+
+  if (lineBreakLength === 0) {
+    const insertion = ` ${renderedEntries.join(" ")} `;
+    return `${content.slice(0, objectStart + 1)}${insertion}${content.slice(objectStart + 1)}`;
+  }
+
+  const insertionIndex = lineBreakStart + lineBreakLength;
+  const newline = content.slice(lineBreakStart, insertionIndex);
+  const propertyIndent = inferJsoncPropertyIndent(content, insertionIndex);
+  const insertion = `${renderedEntries.map((entry) => `${propertyIndent}${entry}`).join(newline)}${newline}`;
+
+  return `${content.slice(0, insertionIndex)}${insertion}${content.slice(insertionIndex)}`;
+}
+
+function isConfigObject(value: unknown): value is SupermemoryConfig & Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function loadRawConfig(): RawConfigResult {
+  if (!existsSync(CONFIG_FILE)) return { config: {}, existed: false };
+
+  try {
+    const content = readFileSync(CONFIG_FILE, "utf-8");
+    const json = stripJsoncComments(content);
+    const parsed: unknown = JSON.parse(json);
+    if (!isConfigObject(parsed)) {
+      throw new Error("expected a top-level object");
+    }
+    return { config: parsed as SupermemoryConfig, existed: true, content };
+  } catch (error) {
+    const parseError = error instanceof Error ? error.message : String(error);
+    return { config: {}, existed: true, parseError };
+  }
 }
 
 const { config: fileConfig, existed: configExisted } = loadRawConfig();
@@ -135,9 +258,6 @@ export function getApiBaseUrl(): string {
   return normalized;
 }
 
-export const CONFIG_FILE = CONFIG_FILES[1];
-const DEFAULT_CONFIG_FILE = CONFIG_FILE ?? join(CONFIG_DIR, "supermemory.json");
-
 export const CONFIG = {
   similarityThreshold: fileConfig.similarityThreshold ?? DEFAULTS.similarityThreshold,
   maxMemories: fileConfig.maxMemories ?? DEFAULTS.maxMemories,
@@ -166,7 +286,45 @@ export function isConfigured(): boolean {
 }
 
 export function writeInstallDefaults(isExistingInstall: boolean): void {
-  const current = loadRawConfig().config;
+  const loaded = loadRawConfig();
+  if (loaded.parseError) {
+    throw new Error(`Cannot update invalid Supermemory config at ${CONFIG_FILE}: ${loaded.parseError}`);
+  }
+
+  const current = loaded.config;
+  const installDefaults = isExistingInstall
+    ? { autoRecallEveryPrompt: true, captureEveryNTurns: 3 }
+    : { autoRecallEveryPrompt: false, captureEveryNTurns: 0 };
+
+  if (CONFIG_FILE.endsWith(".jsonc") && loaded.content !== undefined) {
+    const missingEntries: Array<readonly [key: string, value: boolean | number]> = [];
+    if (current.autoRecallEveryPrompt === undefined) {
+      missingEntries.push(["autoRecallEveryPrompt", installDefaults.autoRecallEveryPrompt]);
+    }
+    if (current.captureEveryNTurns === undefined) {
+      missingEntries.push(["captureEveryNTurns", installDefaults.captureEveryNTurns]);
+    }
+    if (missingEntries.length === 0) return;
+
+    const updated = insertJsoncProperties(
+      loaded.content,
+      missingEntries,
+      Object.keys(current).length > 0,
+    );
+    const reparsed: unknown = JSON.parse(stripJsoncComments(updated));
+    if (
+      !isConfigObject(reparsed) ||
+      Object.keys(reparsed).length !== Object.keys(current).length + missingEntries.length ||
+      missingEntries.some(([key, value]) => reparsed[key] !== value) ||
+      Object.entries(current).some(([key, value]) => !isDeepStrictEqual(reparsed[key], value))
+    ) {
+      throw new Error(`Cannot safely update Supermemory JSONC config at ${CONFIG_FILE}`);
+    }
+
+    writeFileSync(CONFIG_FILE, updated);
+    return;
+  }
+
   const next: SupermemoryConfig = { ...current };
   if (isExistingInstall) {
     if (next.autoRecallEveryPrompt === undefined) next.autoRecallEveryPrompt = true;
@@ -175,5 +333,6 @@ export function writeInstallDefaults(isExistingInstall: boolean): void {
     next.autoRecallEveryPrompt = false;
     next.captureEveryNTurns = 0;
   }
-  writeFileSync(DEFAULT_CONFIG_FILE, JSON.stringify(next, null, 2));
+  mkdirSync(CONFIG_DIR, { recursive: true });
+  writeFileSync(CONFIG_FILE, JSON.stringify(next, null, 2));
 }
