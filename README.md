@@ -125,7 +125,7 @@ Run `/supermemory-init` to have the agent explore and memorize the codebase.
 
 On first message, the agent receives (invisible to user):
 
-- User profile (cross-project preferences)
+- Personal profile for the current project
 - Project memories (all project knowledge)
 - Relevant user memories (semantic search)
 
@@ -193,19 +193,28 @@ The `supermemory` tool is available to the agent:
 | `list`    | `scope?`, `limit?`           | List memories     |
 | `forget`  | `memoryId`, `scope?`         | Delete memory     |
 
-**Scopes:** `user` (cross-project), `project` (default)
+**Scopes:** `user` (personal memories for the current project), `project` (default)
 
 **Types:** `project-config`, `architecture`, `error-solution`, `preference`, `learned-pattern`, `conversation`
 
-OpenCode sends entity context when saving memories so Supermemory can extract
-different facts for user profile memories versus project/codebase knowledge.
+OpenCode sends the same shared coding-agent entity context as Claude Code and
+Codex. Personal and project memories are distinguished with `sm_scope`
+metadata inside the shared repository container.
 
 ## Memory Scoping
 
-| Scope   | Tag                                    | Persists     |
-| ------- | -------------------------------------- | ------------ |
-| User    | `opencode_user_{sha256(git email)}`    | All projects |
-| Project | `opencode_project_{sha256(directory)}` | This project |
+| Scope   | Tag                                         | Metadata                |
+| ------- | ------------------------------------------- | ----------------------- |
+| User    | `repo_{project-name}__{repository-hash}`    | `sm_scope: "personal"`  |
+| Project | `repo_{project-name}__{repository-hash}`    | `sm_scope: "project"`   |
+
+The repository hash comes from the normalized Git `origin` remote, so Claude
+Code, Codex, and OpenCode use the same container for the same repository.
+Repositories with the same name but different remotes remain isolated. Without
+an origin remote, OpenCode falls back to the repository's real filesystem path.
+OpenCode also reads previous `user_project_*`, `repo_<project-name>`,
+`claudecode_project_*`, `codex_user_*`, `codex_project_*`, `opencode_user_*`,
+and `opencode_project_*` containers, so upgrading does not require a migration.
 
 ## Configuration
 
@@ -234,10 +243,10 @@ Create `~/.config/opencode/supermemory.jsonc`:
   // Include user profile in context
   "injectProfile": true,
 
-  // Prefix for container tags (used when userContainerTag/projectContainerTag not set)
+  // Legacy prefix retained when reading containers made by older versions
   "containerTagPrefix": "opencode",
 
-  // Optional: Set exact user container tag (overrides auto-generated tag)
+  // Optional legacy personal container to keep reading
   "userContainerTag": "my-custom-user-tag",
 
   // Optional: Set exact project container tag (overrides auto-generated tag)
@@ -255,26 +264,28 @@ All fields optional. Env var `SUPERMEMORY_API_KEY` takes precedence over config 
 
 ### Container Tag Selection
 
-By default, container tags are auto-generated using `containerTagPrefix` plus a hash:
+By default, new writes use:
 
-- User tag: `{prefix}_user_{hash(git_email)}`
-- Project tag: `{prefix}_project_{hash(directory)}`
+- Repository tag: `repo_{project-name}__{hash(normalized-origin-remote)}`
+- No origin remote: `repo_{project-name}__{hash(real-repository-path)}`
 
-You can override this by specifying exact container tags:
+Older `{prefix}_user_*` and `{prefix}_project_*` containers remain readable.
+`userContainerTag` is treated as a legacy personal read. You can still override
+the unified write container with `projectContainerTag`:
 
 ```jsonc
 {
-  // Use a specific container tag for user memories
+  // Continue reading a personal container made by an older version
   "userContainerTag": "my-team-workspace",
 
-  // Use a specific container tag for project memories
+  // Override the unified container used for new writes
   "projectContainerTag": "my-awesome-project",
 }
 ```
 
 This is useful when you want to:
 
-- Share memories across team members (same `userContainerTag`)
+- Preserve a legacy personal memory container
 - Sync memories between different machines for the same project
 - Organize memories using your own naming scheme
 - Integrate with existing Supermemory container tags from other tools

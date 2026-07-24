@@ -1,4 +1,4 @@
-import type { ProfileResponse } from "supermemory/resources";
+import type { ProfileResponse } from "./client.js";
 import { CONFIG } from "../config.js";
 
 interface MemoryResultMinimal {

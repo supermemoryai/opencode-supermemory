@@ -1,10 +1,11 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { PROJECT_ENTITY_CONTEXT } from "./entity-context.js";
+import { AGENT_ENTITY_CONTEXT } from "./entity-context.js";
 import { supermemoryClient } from "./client.js";
 import { log } from "./logger.js";
 import { CONFIG } from "../config.js";
+import type { ResolvedTags } from "./tags.js";
 
 const MESSAGE_STORAGE = join(homedir(), ".opencode", "messages");
 const PART_STORAGE = join(homedir(), ".opencode", "parts");
@@ -249,7 +250,7 @@ export interface CompactionContext {
 
 export function createCompactionHook(
   ctx: CompactionContext,
-  tags: { user: string; project: string },
+  tags: ResolvedTags,
   options?: CompactionOptions
 ) {
   const state: CompactionState = {
@@ -263,7 +264,12 @@ export function createCompactionHook(
 
   async function fetchProjectMemoriesForCompaction(): Promise<string[]> {
     try {
-      const result = await supermemoryClient.listMemories(tags.project, CONFIG.maxProjectMemories);
+      const result = await supermemoryClient.listMemoriesScoped(
+        tags.canonical,
+        tags.projectReads,
+        "project",
+        CONFIG.maxProjectMemories,
+      );
       const memories = result.memories || [];
       return memories.map((m: any) => m.summary || m.content || "").filter(Boolean);
     } catch (err) {
@@ -301,9 +307,16 @@ export function createCompactionHook(
     try {
       const result = await supermemoryClient.addMemory(
         `[Session Summary]\n${summaryContent}`,
-        tags.project,
-        { type: "conversation" },
-        { entityContext: PROJECT_ENTITY_CONTEXT }
+        tags.canonical,
+        {
+          type: "conversation",
+          project: tags.projectName,
+          sm_project_id: tags.projectId,
+          sm_scope: "personal",
+          sm_capture_mode: "compaction",
+          sessionId: sessionID,
+        },
+        { entityContext: AGENT_ENTITY_CONTEXT }
       );
 
       if (result.success) {

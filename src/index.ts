@@ -2,10 +2,7 @@ import type { Plugin, PluginInput } from "@opencode-ai/plugin";
 import type { Part } from "@opencode-ai/sdk";
 import { tool } from "@opencode-ai/plugin";
 
-import {
-  PROJECT_ENTITY_CONTEXT,
-  USER_ENTITY_CONTEXT,
-} from "./services/entity-context.js";
+import { AGENT_ENTITY_CONTEXT } from "./services/entity-context.js";
 import { supermemoryClient } from "./services/client.js";
 import { formatContextForPrompt } from "./services/context.js";
 import { getTags } from "./services/tags.js";
@@ -27,7 +24,7 @@ The user wants you to remember something. You MUST use the \`supermemory\` tool 
 
 Extract the key information the user wants remembered and save it as a concise, searchable memory.
 - Use \`scope: "project"\` for project-specific preferences (e.g., "run lint with tests")
-- Use \`scope: "user"\` for cross-project preferences (e.g., "prefers concise responses")
+- Use \`scope: "user"\` for personal preferences in this project (e.g., "prefers concise responses")
 - Choose an appropriate \`type\`: "preference", "project-config", "learned-pattern", etc.
 
 DO NOT skip this step. The user explicitly asked you to remember.`;
@@ -146,9 +143,24 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
 
           if (CONFIG.autoRecallEveryPrompt) {
             const [profileResult, userMemoriesResult, projectMemoriesListResult] = await Promise.all([
-              supermemoryClient.getProfile(tags.user, userMessage),
-              supermemoryClient.searchMemories(userMessage, tags.user),
-              supermemoryClient.listMemories(tags.project, CONFIG.maxProjectMemories),
+              supermemoryClient.getProfileScoped(
+                tags.canonical,
+                tags.personalReads,
+                "personal",
+                userMessage,
+              ),
+              supermemoryClient.searchMemoriesScoped(
+                userMessage,
+                tags.canonical,
+                tags.personalReads,
+                "personal",
+              ),
+              supermemoryClient.listMemoriesScoped(
+                tags.canonical,
+                tags.projectReads,
+                "project",
+                CONFIG.maxProjectMemories,
+              ),
             ]);
 
             const profile = profileResult.success ? profileResult : null;
@@ -173,7 +185,11 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
               projectMemories
             );
           } else {
-            const profileResult = await supermemoryClient.getProfile(tags.user);
+            const profileResult = await supermemoryClient.getProfileScoped(
+              tags.canonical,
+              tags.personalReads,
+              "personal",
+            );
             const profile = profileResult.success ? profileResult : null;
             memoryContext = formatContextForPrompt(profile, { results: [] }, { results: [] });
           }
@@ -283,7 +299,7 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
                     },
                   ],
                   scopes: {
-                    user: "Cross-project preferences and knowledge",
+                    user: "Personal preferences and knowledge for this project",
                     project: "Project-specific knowledge (default)",
                   },
                   types: [
@@ -314,16 +330,20 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
                 }
 
                 const scope = args.scope || "project";
-                const containerTag =
-                  scope === "user" ? tags.user : tags.project;
-                const entityContext =
-                  scope === "user" ? USER_ENTITY_CONTEXT : PROJECT_ENTITY_CONTEXT;
+                const internalScope =
+                  scope === "user" ? "personal" : "project";
 
                 const result = await supermemoryClient.addMemory(
                   sanitizedContent,
-                  containerTag,
-                  { type: args.type },
-                  { entityContext }
+                  tags.canonical,
+                  {
+                    type: args.type,
+                    project: tags.projectName,
+                    sm_project_id: tags.projectId,
+                    sm_scope: internalScope,
+                    sm_capture_mode: "tool",
+                  },
+                  { entityContext: AGENT_ENTITY_CONTEXT }
                 );
 
                 if (!result.success) {
@@ -353,9 +373,11 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
                 const scope = args.scope;
 
                 if (scope === "user") {
-                  const result = await supermemoryClient.searchMemories(
+                  const result = await supermemoryClient.searchMemoriesScoped(
                     args.query,
-                    tags.user
+                    tags.canonical,
+                    tags.personalReads,
+                    "personal",
                   );
                   if (!result.success) {
                     return JSON.stringify({
@@ -367,9 +389,11 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
                 }
 
                 if (scope === "project") {
-                  const result = await supermemoryClient.searchMemories(
+                  const result = await supermemoryClient.searchMemoriesScoped(
                     args.query,
-                    tags.project
+                    tags.canonical,
+                    tags.projectReads,
+                    "project",
                   );
                   if (!result.success) {
                     return JSON.stringify({
@@ -380,46 +404,30 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
                   return formatSearchResults(args.query, scope, result, args.limit);
                 }
 
-                const [userResult, projectResult] = await Promise.all([
-                  supermemoryClient.searchMemories(args.query, tags.user),
-                  supermemoryClient.searchMemories(args.query, tags.project),
-                ]);
-
-                if (!userResult.success || !projectResult.success) {
+                const result = await supermemoryClient.searchMemoriesMany(
+                  args.query,
+                  tags.allReads,
+                );
+                if (!result.success) {
                   return JSON.stringify({
                     success: false,
-                    error: userResult.error || projectResult.error || "Failed to search memories",
+                    error: result.error || "Failed to search memories",
                   });
                 }
-
-                const combined = [
-                  ...(userResult.results || []).map((r) => ({
-                    ...r,
-                    scope: "user" as const,
-                  })),
-                  ...(projectResult.results || []).map((r) => ({
-                    ...r,
-                    scope: "project" as const,
-                  })),
-                ].sort((a, b) => (b.similarity ?? 0) - (a.similarity ?? 0));
-
-                return JSON.stringify({
-                  success: true,
-                  query: args.query,
-                  count: combined.length,
-                  results: combined.slice(0, args.limit || 10).map((r) => ({
-                    id: r.id,
-                    content: r.memory || r.chunk,
-                    similarity: Math.round((r.similarity ?? 0) * 100),
-                    scope: r.scope,
-                  })),
-                });
+                return formatSearchResults(
+                  args.query,
+                  undefined,
+                  result,
+                  args.limit,
+                );
               }
 
               case "profile": {
-                const result = await supermemoryClient.getProfile(
-                  tags.user,
-                  args.query
+                const result = await supermemoryClient.getProfileScoped(
+                  tags.canonical,
+                  tags.personalReads,
+                  "personal",
+                  args.query,
                 );
 
                 if (!result.success) {
@@ -441,12 +449,16 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
               case "list": {
                 const scope = args.scope || "project";
                 const limit = args.limit || 20;
-                const containerTag =
-                  scope === "user" ? tags.user : tags.project;
+                const internalScope =
+                  scope === "user" ? "personal" : "project";
+                const readTags =
+                  scope === "user" ? tags.personalReads : tags.projectReads;
 
-                const result = await supermemoryClient.listMemories(
-                  containerTag,
-                  limit
+                const result = await supermemoryClient.listMemoriesScoped(
+                  tags.canonical,
+                  readTags,
+                  internalScope,
+                  limit,
                 );
 
                 if (!result.success) {
@@ -524,7 +536,7 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
 function formatSearchResults(
   query: string,
   scope: string | undefined,
-  results: { results?: Array<{ id: string; memory?: string; chunk?: string; similarity?: number }> },
+  results: { results?: Array<{ id?: string; memory?: string; chunk?: string; similarity?: number }> },
   limit?: number
 ): string {
   const memoryResults = results.results || [];

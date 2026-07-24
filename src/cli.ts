@@ -57,7 +57,7 @@ How the codebase works and why:
 - Known issues and their solutions
 
 **User-scoped** (\`scope: "user"\`):
-- Personal coding preferences across all projects
+- Personal coding preferences relevant to this project
 - Communication style preferences
 - General workflow habits
 
@@ -598,11 +598,12 @@ async function status(): Promise<number> {
   lines.push(`Connected: ${isConfigured() ? "checking..." : "no"}`);
   lines.push(`API key: ${maskKey(SUPERMEMORY_API_KEY)} (${getKeySource()})`);
   lines.push(`API URL: ${apiUrl}`);
-  lines.push("Memory scope: current project + user profile");
+  lines.push("Memory scope: unified project container with personal/project metadata");
   lines.push(`Recall mode: ${CONFIG.autoRecallEveryPrompt ? "auto-recall on every prompt" : "session/event based"}`);
   lines.push(`Capture cadence: ${CONFIG.captureEveryNTurns > 0 ? `every ${CONFIG.captureEveryNTurns} turn${CONFIG.captureEveryNTurns === 1 ? "" : "s"} + session end` : "session end only"}`);
-  lines.push(`Project tag: ${tags.project}`);
-  lines.push(`User tag: ${tags.user}`);
+  lines.push(`Project container: ${tags.canonical}`);
+  lines.push(`Personal reads: ${tags.personalReads.join(", ")}`);
+  lines.push(`Project reads: ${tags.projectReads.join(", ")}`);
 
   if (!isConfigured()) {
     lines.push("");
@@ -613,7 +614,11 @@ async function status(): Promise<number> {
 
   const client = new SupermemoryClient();
   const [profileResult, accountInfo] = await Promise.all([
-    client.getProfile(tags.user),
+    client.getProfileScoped(
+      tags.canonical,
+      tags.personalReads,
+      "personal",
+    ),
     getAccountInfo(apiUrl),
   ]);
 
