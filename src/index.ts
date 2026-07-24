@@ -1,10 +1,12 @@
 import type { Plugin, PluginInput } from "@opencode-ai/plugin";
-import type { Part } from "@opencode-ai/sdk";
+import type { Part, Permission } from "@opencode-ai/sdk";
 import { tool } from "@opencode-ai/plugin";
 
 import { AGENT_ENTITY_CONTEXT } from "./services/entity-context.js";
 import { supermemoryClient } from "./services/client.js";
 import { formatContextForPrompt } from "./services/context.js";
+import { createCaptureHook } from "./services/capture.js";
+import { buildRecallDirective } from "./services/recall.js";
 import { getTags } from "./services/tags.js";
 import { stripPrivateContent, isFullyPrivate } from "./services/privacy.js";
 import { createCompactionHook, type CompactionContext } from "./services/compaction.js";
@@ -41,6 +43,24 @@ function detectMemoryKeyword(text: string): boolean {
 
 function combineContextParts(parts: Array<string | null | undefined>): string {
   return parts.map((part) => part?.trim()).filter(Boolean).join("\n\n");
+}
+
+function isSupermemoryRecallSearch(input: Permission): boolean {
+  const type = String((input as { type?: unknown }).type ?? "");
+  const title = String((input as { title?: unknown }).title ?? "").toLowerCase();
+  const metadata =
+    ((input as { metadata?: Record<string, unknown> }).metadata ?? {}) as Record<string, unknown>;
+
+  const toolName = String(metadata.tool ?? metadata.toolName ?? type);
+  const isSupermemory =
+    type === "supermemory" || toolName === "supermemory" || title.includes("supermemory");
+  if (!isSupermemory) return false;
+
+  const args = (metadata.args ?? metadata.input ?? metadata.arguments ?? metadata) as Record<
+    string,
+    unknown
+  >;
+  return String(args.mode ?? "") === "search";
 }
 
 export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
@@ -86,6 +106,9 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
         getModelLimit,
       })
     : null;
+  const captureHook = isConfigured() && ctx.client
+    ? createCaptureHook(ctx, tags)
+    : null;
 
   return {
     "chat.message": async (input, output) => {
@@ -128,6 +151,16 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
           };
           output.parts.push(nudgePart);
         }
+
+        const recallPart: Part = {
+          id: `prt_supermemory-recall-${Date.now()}`,
+          sessionID: input.sessionID,
+          messageID: output.message.id,
+          type: "text",
+          text: buildRecallDirective(),
+          synthetic: true,
+        };
+        output.parts.push(recallPart);
 
         const isFirstMessage = !injectedSessions.has(input.sessionID);
 
@@ -525,9 +558,24 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
       }),
     },
 
+    "permission.ask": async (input, output) => {
+      if (!isConfigured()) return;
+      try {
+        if (isSupermemoryRecallSearch(input)) {
+          output.status = "allow";
+          log("permission.ask: auto-allowing supermemory recall search");
+        }
+      } catch (error) {
+        log("permission.ask: ERROR", { error: String(error) });
+      }
+    },
+
     event: async (input: { event: { type: string; properties?: unknown } }) => {
       if (compactionHook) {
         await compactionHook.event(input);
+      }
+      if (captureHook) {
+        await captureHook.event(input);
       }
     },
   };

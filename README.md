@@ -148,6 +148,28 @@ Relevant Memories:
 
 The agent uses this context automatically - no manual prompting needed.
 
+### Reasoned Recall
+
+On **every** turn, the agent is shown a short directive asking it to silently
+decide whether recalling saved memory would improve its answer to *this*
+message. The model searches only when earlier work, saved conventions, or user
+preferences are likely to help; trivial and self-contained messages skip the
+network call.
+
+Recall uses the `supermemory` tool in `search` mode and is auto-approved.
+Customize the directive with `recallDirective`. Set `SUPERMEMORY_DEBUG=1` to
+show a `[recall-decision]` line in each reply while testing.
+
+### Automatic Capture
+
+Completed conversations are captured automatically:
+
+- Every `captureEveryNTurns` completed turns, OpenCode saves the new turn batch.
+- Any remaining turns are flushed when the session is deleted or the OpenCode
+  instance shuts down.
+- Synthetic plugin context is excluded and `<private>` content is redacted.
+- Stable capture IDs make repeated lifecycle events idempotent.
+
 ### Keyword Detection
 
 Say "remember", "save this", "don't forget" etc. and the agent auto-saves to memory.
@@ -257,6 +279,13 @@ Create `~/.config/opencode/supermemory.jsonc`:
 
   // Context usage ratio that triggers compaction (0-1)
   "compactionThreshold": 0.8,
+
+  // Save completed conversation batches every N turns (0 = session end only)
+  "captureEveryNTurns": 3,
+
+  // Override the reasoned-recall directive shown to the agent each turn
+  // (null or unset = built-in default)
+  "recallDirective": null,
 }
 ```
 

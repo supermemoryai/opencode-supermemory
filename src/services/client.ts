@@ -478,6 +478,7 @@ export class SupermemoryClient {
     options?: {
       defaultEntityContext?: string;
       entityContextByContainerTag?: Record<string, string>;
+      customId?: string;
     },
   ) {
     log("ingestConversation: start", {
@@ -522,8 +523,13 @@ export class SupermemoryClient {
       const entityContext =
         options?.entityContextByContainerTag?.[tag] ??
         options?.defaultEntityContext;
+      const customId =
+        options?.customId && uniqueTags.length > 1
+          ? `${options.customId}:${tag}`
+          : options?.customId;
       const result = await this.addMemory(content, tag, ingestMetadata, {
         ...(entityContext ? { entityContext } : {}),
+        ...(customId ? { customId } : {}),
       });
       if (result.success) {
         savedIds.push(result.id);

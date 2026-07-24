@@ -11,6 +11,7 @@
   "scripts": {
     "build": "bun build ./src/index.ts --outdir ./dist --target node && bun build ./src/cli.ts --outfile ./dist/cli.js --target node && tsc --emitDeclarationOnly",
     "dev": "tsc --watch",
+    "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [
@@ -39,6 +40,7 @@
     "type": "plugin",
     "hooks": [
       "chat.message",
+      "permission.ask",
       "event"
     ]
   },
