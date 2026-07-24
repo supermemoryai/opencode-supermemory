@@ -5,7 +5,7 @@ import { stripJsoncComments } from "./services/jsonc.js";
 import { loadCredentials } from "./services/auth.js";
 
 const CONFIG_DIR = join(homedir(), ".config", "opencode");
-export const PLUGIN_VERSION = "2.0.9";
+export const PLUGIN_VERSION = "2.0.10";
 const CONFIG_FILES = [
   join(CONFIG_DIR, "supermemory.jsonc"),
   join(CONFIG_DIR, "supermemory.json"),
@@ -29,6 +29,7 @@ interface SupermemoryConfig {
   compactionThreshold?: number;
   autoRecallEveryPrompt?: boolean;
   captureEveryNTurns?: number;
+  recallDirective?: string | null;
 }
 
 const DEFAULT_KEYWORD_PATTERNS = [
@@ -50,7 +51,7 @@ const DEFAULT_KEYWORD_PATTERNS = [
   "always\\s+remember",
 ];
 
-const DEFAULTS: Required<Omit<SupermemoryConfig, "apiKey" | "baseUrl" | "userContainerTag" | "projectContainerTag">> = {
+const DEFAULTS: Required<Omit<SupermemoryConfig, "apiKey" | "baseUrl" | "userContainerTag" | "projectContainerTag" | "recallDirective">> = {
   similarityThreshold: 0.6,
   maxMemories: 5,
   maxProjectMemories: 10,
@@ -78,6 +79,21 @@ function validateCompactionThreshold(value: number | undefined): number {
     return DEFAULTS.compactionThreshold;
   }
   if (value <= 0 || value > 1) return DEFAULTS.compactionThreshold;
+  return value;
+}
+
+function validateCaptureEveryNTurns(
+  value: number | undefined,
+  fallback: number,
+): number {
+  if (
+    value === undefined ||
+    !Number.isFinite(value) ||
+    !Number.isInteger(value) ||
+    value < 0
+  ) {
+    return fallback;
+  }
   return value;
 }
 
@@ -156,13 +172,19 @@ export const CONFIG = {
   autoRecallEveryPrompt:
     fileConfig.autoRecallEveryPrompt ??
     (configExisted ? true : DEFAULTS.autoRecallEveryPrompt),
-  captureEveryNTurns:
-    fileConfig.captureEveryNTurns ??
-    (configExisted ? 3 : DEFAULTS.captureEveryNTurns),
+  captureEveryNTurns: validateCaptureEveryNTurns(
+    fileConfig.captureEveryNTurns,
+    configExisted ? 3 : DEFAULTS.captureEveryNTurns,
+  ),
+  recallDirective: fileConfig.recallDirective ?? null,
 };
 
 export function isConfigured(): boolean {
   return !!SUPERMEMORY_API_KEY;
+}
+
+export function getRecallConfig(): { directive: string | null } {
+  return { directive: CONFIG.recallDirective ?? null };
 }
 
 export function writeInstallDefaults(isExistingInstall: boolean): void {
