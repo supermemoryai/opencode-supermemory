@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { execSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { hostname, homedir } from "node:os";
+import { hostname, homedir, userInfo } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { CONFIG } from "../config.js";
 
@@ -183,6 +183,63 @@ function loadCodexConfig(): {
   }
 }
 
+function loadLegacyCursorConfig(directory: string): {
+  repoContainerTag?: string;
+  userContainerTag?: string;
+  projectContainerTag?: string;
+} {
+  let globalConfig: {
+    repoContainerTag?: string;
+    userContainerTag?: string;
+    projectContainerTag?: string;
+  } | null = null;
+  try {
+    const configPath = join(
+      homedir(),
+      ".config",
+      "cursor",
+      "supermemory.json",
+    );
+    if (existsSync(configPath)) {
+      globalConfig = JSON.parse(readFileSync(configPath, "utf-8")) as {
+        repoContainerTag?: string;
+        userContainerTag?: string;
+        projectContainerTag?: string;
+      };
+    }
+  } catch {}
+
+  let projectConfig: {
+    repoContainerTag?: string;
+    userContainerTag?: string;
+    projectContainerTag?: string;
+  } | null = null;
+  let current = resolve(directory);
+  while (true) {
+    try {
+      const configPath = join(
+        current,
+        ".cursor",
+        ".supermemory",
+        "config.json",
+      );
+      if (existsSync(configPath)) {
+        projectConfig = JSON.parse(readFileSync(configPath, "utf-8")) as {
+          repoContainerTag?: string;
+          userContainerTag?: string;
+          projectContainerTag?: string;
+        };
+        break;
+      }
+    } catch {}
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+
+  return { ...(globalConfig ?? {}), ...(projectConfig ?? {}) };
+}
+
 export function sanitizeRepoName(name: string): string {
   const sanitized = name
     .toLowerCase()
@@ -223,6 +280,8 @@ export function getLegacyGeneratedProjectTag(directory: string): string {
 export function getProjectTag(directory: string): string {
   return (
     loadClaudeProjectConfig(directory)?.repoContainerTag ||
+    process.env.SUPERMEMORY_REPO_TAG ||
+    loadLegacyCursorConfig(directory).repoContainerTag ||
     CONFIG.projectContainerTag ||
     loadCodexConfig()?.projectContainerTag ||
     getGeneratedProjectTag(directory)
@@ -302,6 +361,26 @@ export function getLegacyOpenCodeProjectTags(directory: string): string[] {
   ]);
 }
 
+export function getLegacyCursorUserTags(directory: string): string[] {
+  const config = loadLegacyCursorConfig(directory);
+  const identity =
+    config.userContainerTag ||
+    process.env.SUPERMEMORY_USER_TAG ||
+    process.env.CURSOR_USER_EMAIL ||
+    getGitEmail(directory) ||
+    `${hostname()}_${userInfo().username}`;
+  return [`cursor_user_${sha256(identity)}`];
+}
+
+export function getLegacyCursorProjectTags(directory: string): string[] {
+  const config = loadLegacyCursorConfig(directory);
+  const identity =
+    config.projectContainerTag ||
+    process.env.SUPERMEMORY_PROJECT_TAG ||
+    getProjectBasePath(directory);
+  return [`cursor_project_${sha256(identity)}`];
+}
+
 function uniqueTags(tags: Array<string | null | undefined>): string[] {
   return [
     ...new Set(
@@ -320,6 +399,7 @@ export function getPersonalReadTags(directory: string): string[] {
     ...getLegacyClaudePersonalTags(directory),
     ...getLegacyCodexUserTags(directory),
     ...getLegacyOpenCodeUserTags(directory),
+    ...getLegacyCursorUserTags(directory),
   ]);
 }
 
@@ -330,6 +410,7 @@ export function getProjectReadTags(directory: string): string[] {
     getLegacyGeneratedProjectTag(directory),
     ...getLegacyCodexProjectTags(directory),
     ...getLegacyOpenCodeProjectTags(directory),
+    ...getLegacyCursorProjectTags(directory),
   ]);
 }
 

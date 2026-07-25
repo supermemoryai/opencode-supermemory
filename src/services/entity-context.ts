@@ -1,7 +1,7 @@
 export const AGENT_ENTITY_CONTEXT = `Shared coding-agent memory for one software repository.
 
 RULES:
-- Preserve durable context that helps Claude Code, Codex, or OpenCode continue the work
+- Preserve durable context that helps Claude Code, Codex, OpenCode, or Cursor continue the work
 - Condense assistant responses into decisions, outcomes, and reusable knowledge
 - Keep user preferences and project facts concise and independently understandable
 
