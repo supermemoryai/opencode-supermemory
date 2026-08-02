@@ -68,6 +68,7 @@ export function formatUpdateNotice(info: UpdateInfo): string {
   return [
     "[SUPERMEMORY UPDATE]",
     `Supermemory update available: v${info.currentVersion} -> v${info.latestVersion}`,
-    `Run: ${info.updateCommand}`,
+    `Run (if you have a JS runtime): ${info.updateCommand}`,
+    `Otherwise (e.g. standalone opencode binary), pin "opencode-supermemory@${info.latestVersion}" in your opencode config and restart.`,
   ].join("\n");
 }
