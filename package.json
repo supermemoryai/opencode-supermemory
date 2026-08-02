@@ -9,10 +9,11 @@
     "opencode-supermemory": "./dist/cli.js"
   },
   "scripts": {
-    "build": "bun build ./src/index.ts --outdir ./dist --target node && bun build ./src/cli.ts --outfile ./dist/cli.js --target node && tsc --emitDeclarationOnly",
+    "generate:version": "node scripts/sync-version.mjs",
+    "build": "node scripts/sync-version.mjs && bun build ./src/index.ts --outdir ./dist --target node && bun build ./src/cli.ts --outfile ./dist/cli.js --target node && tsc --emitDeclarationOnly",
     "dev": "tsc --watch",
-    "typecheck": "tsc --noEmit",
-    "test": "bun test"
+    "typecheck": "node scripts/sync-version.mjs && tsc --noEmit",
+    "test": "node scripts/sync-version.mjs && bun test"
   },
   "keywords": [
     "opencode",

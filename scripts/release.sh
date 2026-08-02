@@ -40,7 +40,11 @@ echo "new version: $NEW_VERSION"
 
 jq ".version = \"$NEW_VERSION\"" package.json > package.json.tmp && mv package.json.tmp package.json
 
-git add package.json
+# Keep src/version.ts (PLUGIN_VERSION) in sync with the bumped package.json so
+# they cannot drift.
+node scripts/sync-version.mjs
+
+git add package.json src/version.ts
 git commit -m "v$NEW_VERSION"
 git tag "v$NEW_VERSION"
 

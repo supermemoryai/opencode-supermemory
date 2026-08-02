@@ -5,7 +5,7 @@ import { stripJsoncComments } from "./services/jsonc.js";
 import { loadCredentials } from "./services/auth.js";
 
 const CONFIG_DIR = join(homedir(), ".config", "opencode");
-export const PLUGIN_VERSION = "2.0.10";
+export { PLUGIN_VERSION } from "./version.js";
 const CONFIG_FILES = [
   join(CONFIG_DIR, "supermemory.jsonc"),
   join(CONFIG_DIR, "supermemory.json"),
