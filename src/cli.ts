@@ -554,38 +554,20 @@ async function fetchJson(apiUrl: string, path: string): Promise<unknown | null> 
   }
 }
 
-function findAccountInfo(value: unknown): { email?: string; name?: string; userId?: string; orgName?: string } {
-  const seen = new Set<unknown>();
-  const stack = [value];
-  const result: { email?: string; name?: string; userId?: string; orgName?: string } = {};
-
-  while (stack.length > 0) {
-    const item = stack.pop();
-    if (!item || typeof item !== "object" || seen.has(item)) continue;
-    seen.add(item);
-
-    const record = item as Record<string, unknown>;
-    for (const [key, raw] of Object.entries(record)) {
-      const lower = key.toLowerCase();
-      if (!result.email && lower === "email" && typeof raw === "string") result.email = raw;
-      if (!result.name && lower === "name" && typeof raw === "string") result.name = raw;
-      if (!result.userId && (lower === "userid" || lower === "user_id") && typeof raw === "string") result.userId = raw;
-      if (!result.orgName && (lower === "organizationname" || lower === "orgname") && typeof raw === "string") result.orgName = raw;
-
-      if (raw && typeof raw === "object") stack.push(raw);
-    }
-  }
-
-  return result;
-}
-
 async function getAccountInfo(apiUrl: string): Promise<{ email?: string; name?: string; userId?: string; orgName?: string }> {
-  for (const path of ["/v3/auth/account/memberships", "/v3/account/memberships", "/v3/me"]) {
-    const data = await fetchJson(apiUrl, path);
-    const info = findAccountInfo(data);
-    if (info.email || info.name || info.userId || info.orgName) return info;
-  }
-  return {};
+  const data = await fetchJson(apiUrl, "/v3/session");
+  if (!data || typeof data !== "object") return {};
+
+  const session = data as {
+    user?: { email?: unknown; name?: unknown; id?: unknown };
+    org?: { name?: unknown };
+  };
+  return {
+    email: typeof session.user?.email === "string" ? session.user.email : undefined,
+    name: typeof session.user?.name === "string" ? session.user.name : undefined,
+    userId: typeof session.user?.id === "string" ? session.user.id : undefined,
+    orgName: typeof session.org?.name === "string" ? session.org.name : undefined,
+  };
 }
 
 async function status(): Promise<number> {
