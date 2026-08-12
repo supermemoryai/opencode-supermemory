@@ -12,6 +12,7 @@ const CONFIG_FILES = [
 ];
 
 export const DEFAULT_BASE_URL = "https://api.supermemory.ai";
+const DEFAULT_COMPACTION_THRESHOLD = 0.8;
 
 interface SupermemoryConfig {
   apiKey?: string;
@@ -26,7 +27,9 @@ interface SupermemoryConfig {
   projectContainerTag?: string;
   filterPrompt?: string;
   keywordPatterns?: string[];
-  compactionThreshold?: number;
+  compactionEnabled?: boolean;
+  /** @deprecated OpenCode now owns the compaction trigger. Use compactionEnabled. */
+  compactionThreshold?: number | false;
   autoRecallEveryPrompt?: boolean;
   captureEveryNTurns?: number;
   recallDirective?: string | null;
@@ -60,7 +63,8 @@ const DEFAULTS: Required<Omit<SupermemoryConfig, "apiKey" | "baseUrl" | "userCon
   containerTagPrefix: "opencode",
   filterPrompt: "You are a stateful coding agent. Remember all the information, including but not limited to user's coding preferences, tech stack, behaviours, workflows, and any other relevant details.",
   keywordPatterns: [],
-  compactionThreshold: 0.80,
+  compactionEnabled: true,
+  compactionThreshold: DEFAULT_COMPACTION_THRESHOLD,
   autoRecallEveryPrompt: false,
   captureEveryNTurns: 0,
 };
@@ -74,12 +78,23 @@ function isValidRegex(pattern: string): boolean {
   }
 }
 
-function validateCompactionThreshold(value: number | undefined): number {
-  if (value === undefined || typeof value !== 'number' || isNaN(value)) {
-    return DEFAULTS.compactionThreshold;
+export function validateCompactionThreshold(
+  value: number | false | undefined,
+): number {
+  if (value === false || value === 0) return 0;
+  if (value === undefined || typeof value !== "number" || Number.isNaN(value)) {
+    return DEFAULT_COMPACTION_THRESHOLD;
   }
-  if (value <= 0 || value > 1) return DEFAULTS.compactionThreshold;
+  if (value < 0 || value > 1) return DEFAULT_COMPACTION_THRESHOLD;
   return value;
+}
+
+export function resolveCompactionEnabled(
+  enabled: boolean | undefined,
+  legacyThreshold: number | false | undefined,
+): boolean {
+  if (enabled !== undefined) return enabled;
+  return validateCompactionThreshold(legacyThreshold) !== 0;
 }
 
 function validateCaptureEveryNTurns(
@@ -168,6 +183,10 @@ export const CONFIG = {
     ...DEFAULT_KEYWORD_PATTERNS,
     ...(fileConfig.keywordPatterns ?? []).filter(isValidRegex),
   ],
+  compactionEnabled: resolveCompactionEnabled(
+    fileConfig.compactionEnabled,
+    fileConfig.compactionThreshold,
+  ),
   compactionThreshold: validateCompactionThreshold(fileConfig.compactionThreshold),
   autoRecallEveryPrompt:
     fileConfig.autoRecallEveryPrompt ??

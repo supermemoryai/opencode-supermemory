@@ -185,15 +185,16 @@ Add custom triggers via `keywordPatterns` config.
 
 Run `/supermemory-init` to explore and memorize your codebase structure, patterns, and conventions.
 
-### Preemptive Compaction
+### Native Compaction Integration
 
-When context hits 80% capacity:
+When OpenCode compacts a session, Supermemory:
 
-1. Triggers OpenCode's summarization
-2. Injects project memories into summary context
-3. Saves session summary as a memory
+1. Injects project memories and continuity instructions into OpenCode's compaction context
+2. Lets OpenCode select the compaction model and restore the session's original model
+3. Saves the completed session summary as a memory
 
-This preserves conversation context across compaction events.
+Supermemory does not run a separate token threshold, summarization request, or
+synthetic continuation, so it cannot race OpenCode's native auto-compaction.
 
 ### Privacy
 
@@ -277,8 +278,11 @@ Create `~/.config/opencode/supermemory.jsonc`:
   // Extra keyword patterns for memory detection (regex)
   "keywordPatterns": ["log\\s+this", "write\\s+down"],
 
-  // Context usage ratio that triggers compaction (0-1)
-  "compactionThreshold": 0.8,
+  // Inject Supermemory context into OpenCode's native compaction lifecycle
+  "compactionEnabled": true,
+
+  // Legacy disable setting; 0 disables compaction integration
+  // "compactionThreshold": 0,
 
   // Save completed conversation batches every N turns (0 = session end only)
   "captureEveryNTurns": 3,
@@ -321,15 +325,9 @@ This is useful when you want to:
 
 ## Usage with Oh My OpenCode
 
-If you're using [Oh My OpenCode](https://github.com/code-yeongyu/oh-my-opencode), disable its built-in auto-compact hook to let supermemory handle context compaction:
-
-Add to `~/.config/opencode/oh-my-opencode.json`:
-
-```json
-{
-  "disabled_hooks": ["anthropic-context-window-limit-recovery"]
-}
-```
+Supermemory uses OpenCode's native compaction lifecycle and does not install a
+competing auto-compaction trigger. It does not require changes to your
+[Oh My OpenCode](https://github.com/code-yeongyu/oh-my-opencode) configuration.
 
 ## Development
 

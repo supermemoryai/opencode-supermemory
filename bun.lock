@@ -5,7 +5,7 @@
     "": {
       "name": "opencode-plugin",
       "devDependencies": {
-        "@opencode-ai/plugin": "^1.0.162",
+        "@opencode-ai/plugin": "^1.0.191",
         "@types/bun": "latest",
         "supermemory": "^4.0.0",
         "typescript": "^5.7.3",
