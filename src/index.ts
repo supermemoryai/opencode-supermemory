@@ -7,7 +7,7 @@ import { supermemoryClient } from "./services/client.js";
 import { formatContextForPrompt } from "./services/context.js";
 import { createCaptureHook } from "./services/capture.js";
 import { buildRecallDirective } from "./services/recall.js";
-import { getTags } from "./services/tags.js";
+import { getTags, type ResolvedTags } from "./services/tags.js";
 import { stripPrivateContent, isFullyPrivate } from "./services/privacy.js";
 import { createCompactionHook, type CompactionContext } from "./services/compaction.js";
 
@@ -31,6 +31,20 @@ Extract the key information the user wants remembered and save it as a concise, 
 
 DO NOT skip this step. The user explicitly asked you to remember.`;
 const UPDATE_COMMAND = "bunx opencode-supermemory@latest install";
+
+export function createToolMemoryMetadata(
+  scope: "personal" | "project",
+  type: MemoryType | undefined,
+  tags: Pick<ResolvedTags, "projectName" | "projectId">,
+) {
+  return {
+    type,
+    project: tags.projectName,
+    sm_project_id: tags.projectId,
+    agent_scope: scope,
+    sm_capture_mode: "tool",
+  };
+}
 
 function removeCodeBlocks(text: string): string {
   return text.replace(CODE_BLOCK_PATTERN, "").replace(INLINE_CODE_PATTERN, "");
@@ -369,13 +383,7 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
                 const result = await supermemoryClient.addMemory(
                   sanitizedContent,
                   tags.canonical,
-                  {
-                    type: args.type,
-                    project: tags.projectName,
-                    sm_project_id: tags.projectId,
-                    sm_scope: internalScope,
-                    sm_capture_mode: "tool",
-                  },
+                  createToolMemoryMetadata(internalScope, args.type, tags),
                   { entityContext: AGENT_ENTITY_CONTEXT }
                 );
 
