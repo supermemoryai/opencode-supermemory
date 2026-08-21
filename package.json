@@ -5,12 +5,25 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./v2": {
+      "types": "./dist/v2/index.d.ts",
+      "import": "./dist/v2/index.js",
+      "default": "./dist/v2/index.js"
+    },
+    "./package.json": "./package.json"
+  },
   "bin": {
     "opencode-supermemory": "./dist/cli.js"
   },
   "scripts": {
     "generate:version": "node scripts/sync-version.mjs",
-    "build": "node scripts/sync-version.mjs && bun build ./src/index.ts --outdir ./dist --target node && bun build ./src/cli.ts --outfile ./dist/cli.js --target node && tsc --emitDeclarationOnly",
+    "build": "node scripts/sync-version.mjs && bun build ./src/index.ts --outdir ./dist --target node && bun build ./src/v2/index.ts --outfile ./dist/v2/index.js --target node && bun build ./src/cli.ts --outfile ./dist/cli.js --target node && tsc --emitDeclarationOnly",
     "dev": "tsc --watch",
     "typecheck": "node scripts/sync-version.mjs && tsc --noEmit",
     "test": "node scripts/sync-version.mjs && bun test"
@@ -30,8 +43,9 @@
     "url": "https://github.com/supermemoryai/opencode-supermemory"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "^1.0.162",
+    "@opencode-ai/plugin": "0.0.0-beta-17728",
     "@types/bun": "latest",
+    "jsonc-parser": "3.3.1",
     "supermemory": "^4.0.0",
     "typescript": "^5.7.3"
   },
@@ -40,6 +54,7 @@
     "hooks": [
       "chat.message",
       "permission.ask",
+      "experimental.session.compacting",
       "event"
     ]
   },

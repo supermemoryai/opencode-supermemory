@@ -3,16 +3,14 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import * as readline from "node:readline";
-import { stripJsoncComments } from "./services/jsonc.js";
 import { startAuthFlow, clearCredentials, loadCredentials, CREDENTIALS_FILE } from "./services/auth.js";
 import { CONFIG, CONFIG_FILE, SUPERMEMORY_API_KEY, getApiBaseUrl, isConfigured, writeInstallDefaults } from "./config.js";
 import { SupermemoryClient } from "./services/client.js";
 import { getTags } from "./services/tags.js";
+import { editOpenCodeConfig } from "./services/opencode-config.js";
 
 const OPENCODE_CONFIG_DIR = join(homedir(), ".config", "opencode");
 const OPENCODE_COMMAND_DIR = join(OPENCODE_CONFIG_DIR, "command");
-const OH_MY_OPENCODE_CONFIG = join(OPENCODE_CONFIG_DIR, "oh-my-opencode.json");
-const PLUGIN_NAME = "opencode-supermemory@latest";
 const DEFAULT_CONFIG_FILE = CONFIG_FILE ?? join(OPENCODE_CONFIG_DIR, "supermemory.json");
 
 const SUPERMEMORY_INIT_COMMAND = `---
@@ -256,51 +254,18 @@ function findOpencodeConfig(): string | null {
 function addPluginToConfig(configPath: string): boolean {
   try {
     const content = readFileSync(configPath, "utf-8");
-    
-    if (content.includes("opencode-supermemory")) {
-      console.log("✓ Plugin already registered in config");
-      return true;
-    }
+    const result = editOpenCodeConfig(content);
 
-    const jsonContent = stripJsoncComments(content);
-    let config: Record<string, unknown>;
-    
-    try {
-      config = JSON.parse(jsonContent);
-    } catch {
-      console.error("✗ Failed to parse config file");
-      return false;
-    }
-
-    const plugins = (config.plugin as string[]) || [];
-    plugins.push(PLUGIN_NAME);
-    config.plugin = plugins;
-
-    if (configPath.endsWith(".jsonc")) {
-      if (content.includes('"plugin"')) {
-        const newContent = content.replace(
-          /("plugin"\s*:\s*\[)([^\]]*?)(\])/,
-          (_match, start, middle, end) => {
-            const trimmed = middle.trim();
-            if (trimmed === "") {
-              return `${start}\n    "${PLUGIN_NAME}"\n  ${end}`;
-            }
-            return `${start}${middle.trimEnd()},\n    "${PLUGIN_NAME}"\n  ${end}`;
-          }
-        );
-        writeFileSync(configPath, newContent);
-      } else {
-        const newContent = content.replace(
-          /^(\s*\{)/,
-          `$1\n  "plugin": ["${PLUGIN_NAME}"],`
-        );
-        writeFileSync(configPath, newContent);
-      }
+    if (result.changed) {
+      writeFileSync(configPath, result.content);
+      console.log(`✓ Added OpenCode V1 and V2 plugin entries to ${configPath}`);
     } else {
-      writeFileSync(configPath, JSON.stringify(config, null, 2));
+      console.log("✓ OpenCode V1 and V2 plugin entries already registered");
     }
 
-    console.log(`✓ Added plugin to ${configPath}`);
+    for (const warning of result.warnings) {
+      console.warn(`⚠ ${warning}`);
+    }
     return true;
   } catch (err) {
     console.error("✗ Failed to update config:", err);
@@ -311,13 +276,9 @@ function addPluginToConfig(configPath: string): boolean {
 function createNewConfig(): boolean {
   const configPath = join(OPENCODE_CONFIG_DIR, "opencode.jsonc");
   mkdirSync(OPENCODE_CONFIG_DIR, { recursive: true });
-  
-  const config = `{
-  "plugin": ["${PLUGIN_NAME}"]
-}
-`;
-  
-  writeFileSync(configPath, config);
+
+  const config = editOpenCodeConfig("{}\n");
+  writeFileSync(configPath, config.content);
   console.log(`✓ Created ${configPath}`);
   return true;
 }
@@ -344,58 +305,8 @@ function createCommands(): boolean {
   return true;
 }
 
-function isOhMyOpencodeInstalled(): boolean {
-  const configPath = findOpencodeConfig();
-  if (!configPath) return false;
-  
-  try {
-    const content = readFileSync(configPath, "utf-8");
-    return content.includes("oh-my-opencode");
-  } catch {
-    return false;
-  }
-}
-
-function isAutoCompactAlreadyDisabled(): boolean {
-  if (!existsSync(OH_MY_OPENCODE_CONFIG)) return false;
-  
-  try {
-    const content = readFileSync(OH_MY_OPENCODE_CONFIG, "utf-8");
-    const config = JSON.parse(content);
-    const disabledHooks = config.disabled_hooks as string[] | undefined;
-    return disabledHooks?.includes("anthropic-context-window-limit-recovery") ?? false;
-  } catch {
-    return false;
-  }
-}
-
-function disableAutoCompactHook(): boolean {
-  try {
-    let config: Record<string, unknown> = {};
-    
-    if (existsSync(OH_MY_OPENCODE_CONFIG)) {
-      const content = readFileSync(OH_MY_OPENCODE_CONFIG, "utf-8");
-      config = JSON.parse(content);
-    }
-    
-    const disabledHooks = (config.disabled_hooks as string[]) || [];
-    if (!disabledHooks.includes("anthropic-context-window-limit-recovery")) {
-      disabledHooks.push("anthropic-context-window-limit-recovery");
-    }
-    config.disabled_hooks = disabledHooks;
-    
-    writeFileSync(OH_MY_OPENCODE_CONFIG, JSON.stringify(config, null, 2));
-    console.log(`✓ Disabled anthropic-context-window-limit-recovery hook in oh-my-opencode.json`);
-    return true;
-  } catch (err) {
-    console.error("✗ Failed to update oh-my-opencode.json:", err);
-    return false;
-  }
-}
-
 interface InstallOptions {
   tui: boolean;
-  disableAutoCompact: boolean;
 }
 
 async function install(options: InstallOptions): Promise<number> {
@@ -446,33 +357,9 @@ async function install(options: InstallOptions): Promise<number> {
     createCommands();
   }
 
-  // Step 3: Configure Oh My OpenCode (if installed)
-  if (isOhMyOpencodeInstalled()) {
-    console.log("\nStep 3: Configure Oh My OpenCode");
-    console.log("Detected Oh My OpenCode plugin.");
-    console.log("Supermemory handles context compaction, so the built-in context-window-limit-recovery hook should be disabled.");
-    
-    if (isAutoCompactAlreadyDisabled()) {
-      console.log("✓ anthropic-context-window-limit-recovery hook already disabled");
-    } else {
-      if (options.tui) {
-        const shouldDisable = await confirm(rl!, "Disable anthropic-context-window-limit-recovery hook to let Supermemory handle context?");
-        if (!shouldDisable) {
-          console.log("Skipped.");
-        } else {
-          disableAutoCompactHook();
-        }
-      } else if (options.disableAutoCompact) {
-        disableAutoCompactHook();
-      } else {
-        console.log("Skipped. Use --disable-context-recovery to disable the hook in non-interactive mode.");
-      }
-    }
-  }
-
   if (rl) rl.close();
 
-  // Step 4: Authenticate
+  // Final step: Authenticate
   console.log("\n" + "─".repeat(50));
   console.log("\n🔑 Final step: Authenticate with Supermemory\n");
 
@@ -654,7 +541,6 @@ opencode-supermemory - Persistent memory for OpenCode agents
 Commands:
   install    Install and configure the plugin
     --no-tui                     Non-interactive mode (for LLM agents)
-    --disable-context-recovery   Disable Oh My OpenCode's context hook
   login      Authenticate with Supermemory (opens browser)
   logout     Clear stored credentials
   status     Show Supermemory connection status
@@ -676,13 +562,11 @@ if (args.length === 0 || args[0] === "help" || args[0] === "--help" || args[0] =
 
 if (args[0] === "install") {
   const noTui = args.includes("--no-tui");
-  const disableAutoCompact = args.includes("--disable-context-recovery");
-  install({ tui: !noTui, disableAutoCompact }).then((code) => process.exit(code));
+  install({ tui: !noTui }).then((code) => process.exit(code));
 } else if (args[0] === "setup") {
   console.log("Note: 'setup' is deprecated. Use 'install' instead.\n");
   const noTui = args.includes("--no-tui");
-  const disableAutoCompact = args.includes("--disable-context-recovery");
-  install({ tui: !noTui, disableAutoCompact }).then((code) => process.exit(code));
+  install({ tui: !noTui }).then((code) => process.exit(code));
 } else if (args[0] === "login") {
   login().then((code) => process.exit(code));
 } else if (args[0] === "logout") {

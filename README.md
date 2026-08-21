@@ -4,6 +4,11 @@ OpenCode plugin for persistent memory using [Supermemory](https://supermemory.ai
 
 Your agent remembers what you tell it - across sessions, across projects.
 
+One package supports both OpenCode generations. OpenCode V1 loads
+`opencode-supermemory`; the OpenCode 2 beta loads `opencode-supermemory/v2`.
+The initial V2 adapter targets `@opencode-ai/plugin` beta `0.0.0-beta-17728`.
+Use the `opencode` binary for V1 and `opencode2` for the beta while testing both.
+
 ## Installation
 
 ### For Humans
@@ -45,7 +50,8 @@ bunx opencode-supermemory@latest install --no-tui
 
 This will:
 
-- Register the plugin in `~/.config/opencode/opencode.jsonc`
+- Register both the V1 and V2 entrypoints in `~/.config/opencode/opencode.jsonc`
+- Allow only the V2 `supermemory_recall` helper without prompting
 - Create the `/supermemory-init` command
 
 #### Step 2: Verify the config
@@ -58,9 +64,21 @@ Should contain:
 
 ```json
 {
-  "plugin": ["opencode-supermemory"]
+  "plugin": ["opencode-supermemory@latest"],
+  "plugins": ["opencode-supermemory/v2"],
+  "permissions": [
+    {
+      "action": "supermemory_recall",
+      "resource": "*",
+      "effect": "allow"
+    }
+  ]
 }
 ```
+
+OpenCode V1 reads the singular `plugin` entry. OpenCode 2 reads the plural
+`plugins` entry and loads the V2 adapter. Both entrypoints ship in the same npm
+package and use the same Supermemory account and configuration.
 
 If not, add it manually:
 
@@ -69,8 +87,19 @@ If not, add it manually:
 ```jsonc
 {
   "plugin": [
-    "opencode-supermemory",
+    "opencode-supermemory@latest",
     // ... other plugins
+  ],
+  "plugins": [
+    "opencode-supermemory/v2",
+    // ... other OpenCode 2 plugins
+  ],
+  "permissions": [
+    {
+      "action": "supermemory_recall",
+      "resource": "*",
+      "effect": "allow",
+    },
   ],
 }
 ```
@@ -79,9 +108,22 @@ If not, add it manually:
 
 ```json
 {
-  "plugin": ["opencode-supermemory"]
+  "plugin": ["opencode-supermemory@latest"],
+  "plugins": ["opencode-supermemory/v2"],
+  "permissions": [
+    {
+      "action": "supermemory_recall",
+      "resource": "*",
+      "effect": "allow"
+    }
+  ]
 }
 ```
+
+The installer preserves comments, existing plugins, permissions, and unrelated
+settings. Running it again is safe. If `supermemory_recall` is explicitly
+denied, the installer keeps that deny and prints a warning instead of
+overriding it.
 
 #### Step 3: Authenticate
 
@@ -110,7 +152,7 @@ bunx opencode-supermemory@latest status
 If it is not connected, check:
 
 1. Is the user authenticated, or is `SUPERMEMORY_API_KEY` set?
-2. Is the plugin in `opencode.jsonc`?
+2. Does `opencode.jsonc` contain the V1 `plugin` and V2 `plugins` entries shown above?
 3. Check logs: `tail ~/.opencode-supermemory.log`
 
 #### Step 5: Initialize codebase memory (optional)
@@ -118,6 +160,14 @@ If it is not connected, check:
 Run `/supermemory-init` to have the agent explore and memorize the codebase.
 
 </details>
+
+### OpenCode 2 rollback
+
+To stop loading the beta adapter without affecting OpenCode V1, remove only
+`"opencode-supermemory/v2"` from the plural `plugins` array and restart
+OpenCode 2. The singular `plugin` entry continues to load the V1 adapter. The
+recall permission may remain in the file; it has no effect when the V2 adapter
+is not loaded.
 
 ## Features
 
@@ -156,9 +206,12 @@ message. The model searches only when earlier work, saved conventions, or user
 preferences are likely to help; trivial and self-contained messages skip the
 network call.
 
-Recall uses the `supermemory` tool in `search` mode and is auto-approved.
-Customize the directive with `recallDirective`. Set `SUPERMEMORY_DEBUG=1` to
-show a `[recall-decision]` line in each reply while testing.
+On V1, recall uses the `supermemory` tool in `search` mode. On OpenCode 2, it
+uses the search-only `supermemory_recall` helper, which is the only V2 action
+the installer auto-allows. Add and forget operations remain behind the normal
+`supermemory` permission. Customize the directive with `recallDirective`. Set
+`SUPERMEMORY_DEBUG=1` to show a `[recall-decision]` line in each reply while
+testing.
 
 ### Automatic Capture
 
@@ -185,15 +238,13 @@ Add custom triggers via `keywordPatterns` config.
 
 Run `/supermemory-init` to explore and memorize your codebase structure, patterns, and conventions.
 
-### Preemptive Compaction
+### Native Compaction Lifecycle
 
-When context hits 80% capacity:
-
-1. Triggers OpenCode's summarization
-2. Injects project memories into summary context
-3. Saves session summary as a memory
-
-This preserves conversation context across compaction events.
+OpenCode decides when to compact, which model to use, and how execution
+continues afterward. Supermemory enriches that native lifecycle by injecting
+bounded project memory into compaction context and saving only successful
+session summaries. It does not trigger compaction or override OpenCode's
+configured compaction model.
 
 ### Privacy
 
@@ -277,8 +328,8 @@ Create `~/.config/opencode/supermemory.jsonc`:
   // Extra keyword patterns for memory detection (regex)
   "keywordPatterns": ["log\\s+this", "write\\s+down"],
 
-  // Context usage ratio that triggers compaction (0-1)
-  "compactionThreshold": 0.8,
+  // Enrich OpenCode's native compaction lifecycle with Supermemory
+  "compactionEnabled": true,
 
   // Save completed conversation batches every N turns (0 = session end only)
   "captureEveryNTurns": 3,
@@ -321,7 +372,7 @@ This is useful when you want to:
 
 ## Usage with Oh My OpenCode
 
-If you're using [Oh My OpenCode](https://github.com/code-yeongyu/oh-my-opencode), disable its built-in auto-compact hook to let supermemory handle context compaction:
+If you're using [Oh My OpenCode](https://github.com/code-yeongyu/oh-my-opencode), disable its built-in auto-compact hook so it does not compete with OpenCode's native compaction lifecycle:
 
 Add to `~/.config/opencode/oh-my-opencode.json`:
 
@@ -339,13 +390,20 @@ bun run build
 bun run typecheck
 ```
 
-Local install:
+Local install after building:
 
 ```jsonc
 {
   "plugin": ["file:///path/to/opencode-supermemory"],
+  "plugins": [
+    "file:///path/to/opencode-supermemory/dist/v2/index.js",
+  ],
 }
 ```
+
+Launch `opencode` to test the V1 entry and `opencode2` to test the V2 entry.
+The direct built-file URL is for local development only; the published package
+uses the stable `opencode-supermemory/v2` export shown above.
 
 ## Logs
 
