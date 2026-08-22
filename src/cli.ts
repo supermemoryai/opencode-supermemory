@@ -581,8 +581,8 @@ async function status(): Promise<number> {
   lines.push(`API key: ${maskKey(SUPERMEMORY_API_KEY)} (${getKeySource()})`);
   lines.push(`API URL: ${apiUrl}`);
   lines.push("Memory scope: unified project container with personal/project metadata");
-  lines.push(`Recall mode: per-turn reasoned recall${CONFIG.autoRecallEveryPrompt ? " + eager session-start dump" : ""}`);
-  lines.push(`Recall directive: ${CONFIG.recallDirective ? "custom" : "default"}`);
+  lines.push(`Recall mode: ${CONFIG.recallMode}`);
+  lines.push(`Recall directive: ${CONFIG.recallMode === "advisory" && CONFIG.recallDirective ? "custom" : "default"}`);
   lines.push(`Capture cadence: ${CONFIG.captureEveryNTurns > 0 ? `every ${CONFIG.captureEveryNTurns} turn${CONFIG.captureEveryNTurns === 1 ? "" : "s"} + session end` : "session end only"}`);
   lines.push(`Project container: ${tags.canonical}`);
   lines.push(`Personal reads: ${tags.personalReads.join(", ")}`);

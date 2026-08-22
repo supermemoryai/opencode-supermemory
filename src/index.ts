@@ -6,7 +6,12 @@ import { AGENT_ENTITY_CONTEXT } from "./services/entity-context.js";
 import { supermemoryClient } from "./services/client.js";
 import { formatContextForPrompt } from "./services/context.js";
 import { createCaptureHook } from "./services/capture.js";
-import { buildRecallDirective } from "./services/recall.js";
+import {
+  buildDirectRecallContext,
+  buildRecallDirective,
+  DIRECT_RECALL_TIMEOUT_MS,
+  RecallSessionCache,
+} from "./services/recall.js";
 import {
   formatRecallHit,
   normalizeRecallResult,
@@ -71,6 +76,7 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
   const { directory } = ctx;
   const tags = getTags(directory);
   const injectedSessions = new Set<string>();
+  const recallSessions = new RecallSessionCache();
   log("Plugin init", { directory, tags, configured: isConfigured() });
 
   if (!isConfigured()) {
@@ -156,103 +162,114 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
           output.parts.push(nudgePart);
         }
 
-        const recallPart: Part = {
-          id: `prt_supermemory-recall-${Date.now()}`,
-          sessionID: input.sessionID,
-          messageID: output.message.id,
-          type: "text",
-          text: buildRecallDirective(),
-          synthetic: true,
-        };
-        output.parts.push(recallPart);
-
         const isFirstMessage = !injectedSessions.has(input.sessionID);
+        if (isFirstMessage) injectedSessions.add(input.sessionID);
 
-        if (isFirstMessage) {
-          injectedSessions.add(input.sessionID);
-
-          let memoryContext = "";
-          const updateCheck = checkNpmUpdate(
-            "opencode-supermemory",
-            PLUGIN_VERSION,
-            UPDATE_COMMAND
-          ).then((info) => (info ? formatUpdateNotice(info) : null));
-
-          if (CONFIG.autoRecallEveryPrompt) {
-            const [profileResult, userMemoriesResult, projectMemoriesListResult] = await Promise.all([
-              supermemoryClient.getProfileScoped(
-                tags.canonical,
-                tags.personalReads,
-                "personal",
-                userMessage,
-              ),
-              supermemoryClient.searchMemoriesScoped(
-                userMessage,
-                tags.canonical,
-                tags.personalReads,
-                "personal",
-              ),
-              supermemoryClient.listMemoriesScoped(
-                tags.canonical,
-                tags.projectReads,
-                "project",
-                CONFIG.maxProjectMemories,
-              ),
-            ]);
-
-            const profile = profileResult.success ? profileResult : null;
-            const userMemories = userMemoriesResult.success ? userMemoriesResult : { results: [] };
-            const projectMemoriesList = projectMemoriesListResult.success ? projectMemoriesListResult : { memories: [] };
-
-            const projectMemories = {
-              results: (projectMemoriesList.memories || []).map((m: any) => ({
-                id: m.id,
-                memory: m.summary || m.content || m.title || "",
-                similarity: 1,
-                title: m.title,
-                metadata: m.metadata,
-              })),
-              total: projectMemoriesList.memories?.length || 0,
-              timing: 0,
-            };
-
-            memoryContext = formatContextForPrompt(
-              profile,
-              userMemories,
-              projectMemories
-            );
-          } else {
-            const profileResult = await supermemoryClient.getProfileScoped(
-              tags.canonical,
-              tags.personalReads,
-              "personal",
-            );
-            const profile = profileResult.success ? profileResult : null;
-            memoryContext = formatContextForPrompt(profile, { results: [] }, { results: [] });
-          }
-
-          const updateNotice = await updateCheck;
-          const firstMessageContext = combineContextParts([memoryContext, updateNotice]);
-
-          if (firstMessageContext) {
-            const contextPart: Part = {
-              id: `prt_supermemory-context-${Date.now()}`,
-              sessionID: input.sessionID,
-              messageID: output.message.id,
-              type: "text",
-              text: firstMessageContext,
-              synthetic: true,
-            };
-
-            output.parts.unshift(contextPart);
-
-            const duration = Date.now() - start;
-            log("chat.message: context injected", {
-              duration,
-              contextLength: firstMessageContext.length,
-            });
-          }
+        if (CONFIG.recallMode === "advisory") {
+          output.parts.push({
+            id: `prt_supermemory-recall-${Date.now()}`,
+            sessionID: input.sessionID,
+            messageID: output.message.id,
+            type: "text",
+            text: buildRecallDirective(),
+            synthetic: true,
+          });
         }
+
+        const profileRequest =
+          isFirstMessage && CONFIG.recallMode !== "off" && CONFIG.injectProfile
+            ? supermemoryClient.getProfileScoped(
+                tags.canonical,
+                tags.personalReads,
+                "personal",
+                undefined,
+                { timeoutMs: DIRECT_RECALL_TIMEOUT_MS },
+              )
+            : Promise.resolve(null);
+
+        const directRecall =
+          CONFIG.recallMode === "direct"
+            ? buildDirectRecallContext({
+                prompt: userMessage,
+                sessionID: input.sessionID,
+                cache: recallSessions,
+                search: (query) =>
+                  supermemoryClient.searchMemoriesForRecall(
+                    query,
+                    tags.canonical,
+                    tags.personalReads,
+                    tags.projectReads,
+                    { timeoutMs: DIRECT_RECALL_TIMEOUT_MS },
+                  ),
+                suppressTexts: isFirstMessage
+                  ? profileRequest.then((result) =>
+                      result?.success && result.profile
+                        ? [
+                            ...result.profile.static,
+                            ...result.profile.dynamic,
+                          ]
+                        : [],
+                    )
+                  : undefined,
+              })
+            : Promise.resolve("");
+
+        const firstMessage = isFirstMessage
+          ? Promise.all([
+              profileRequest,
+              checkNpmUpdate(
+                "opencode-supermemory",
+                PLUGIN_VERSION,
+                UPDATE_COMMAND,
+              ),
+            ]).then(([profileResult, updateInfo]) => {
+              const profile = profileResult?.success ? profileResult : null;
+              const memoryContext = profile
+                ? formatContextForPrompt(
+                    profile,
+                    { results: [] },
+                    { results: [] },
+                  )
+                : "";
+              return combineContextParts([
+                memoryContext,
+                updateInfo ? formatUpdateNotice(updateInfo) : null,
+              ]);
+            })
+          : Promise.resolve("");
+
+        const [directRecallContext, firstMessageContext] = await Promise.all([
+          directRecall,
+          firstMessage,
+        ]);
+
+        if (firstMessageContext) {
+          output.parts.unshift({
+            id: `prt_supermemory-context-${Date.now()}`,
+            sessionID: input.sessionID,
+            messageID: output.message.id,
+            type: "text",
+            text: firstMessageContext,
+            synthetic: true,
+          });
+        }
+
+        if (directRecallContext) {
+          output.parts.push({
+            id: `prt_supermemory-direct-recall-${Date.now()}`,
+            sessionID: input.sessionID,
+            messageID: output.message.id,
+            type: "text",
+            text: directRecallContext,
+            synthetic: true,
+          });
+        }
+
+        log("chat.message: context processed", {
+          duration: Date.now() - start,
+          firstMessageContextLength: firstMessageContext.length,
+          directRecallContextLength: directRecallContext.length,
+        });
 
       } catch (error) {
         log("chat.message: ERROR", { error: String(error) });
@@ -582,6 +599,18 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
     },
 
     event: async (input: { event: { type: string; properties?: unknown } }) => {
+      const props = input.event.properties as Record<string, unknown> | undefined;
+      if (input.event.type === "session.deleted") {
+        const sessionID = (props?.info as { id?: string } | undefined)?.id;
+        if (sessionID) {
+          injectedSessions.delete(sessionID);
+          recallSessions.delete(sessionID);
+        }
+      } else if (input.event.type === "server.instance.disposed") {
+        injectedSessions.clear();
+        recallSessions.clear();
+      }
+
       if (compactionHook) {
         await compactionHook.event(input);
       }

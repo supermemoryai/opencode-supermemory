@@ -148,17 +148,17 @@ Relevant Memories:
 
 The agent uses this context automatically - no manual prompting needed.
 
-### Reasoned Recall
+### Direct Recall
 
-On **every** turn, the agent is shown a short directive asking it to silently
-decide whether recalling saved memory would improve its answer to *this*
-message. The model searches only when earlier work, saved conventions, or user
-preferences are likely to help; trivial and self-contained messages skip the
-network call.
+On every substantive prompt, Supermemory directly searches the current project
+and injects up to five strong, fresh matches. Short prompts and commands are
+skipped, repeat results are suppressed per session, and recall fails open after
+three seconds so it never blocks the agent indefinitely.
 
-Recall uses the `supermemory` tool in `search` mode and is auto-approved.
-Customize the directive with `recallDirective`. Set `SUPERMEMORY_DEBUG=1` to
-show a `[recall-decision]` line in each reply while testing.
+Set `recallMode` to `"advisory"` to retain model-decided tool recall, or to
+`"off"` to disable automatic recall. `recallDirective` customizes advisory mode.
+Legacy `autoRecallEveryPrompt: true` maps to direct mode and `false` maps to
+advisory mode when `recallMode` is unset.
 
 ### Automatic Capture
 
@@ -283,8 +283,10 @@ Create `~/.config/opencode/supermemory.jsonc`:
   // Save completed conversation batches every N turns (0 = session end only)
   "captureEveryNTurns": 3,
 
-  // Override the reasoned-recall directive shown to the agent each turn
-  // (null or unset = built-in default)
+  // "direct" (default for new installs), "advisory", or "off"
+  "recallMode": "direct",
+
+  // Override the directive used in advisory mode
   "recallDirective": null,
 }
 ```
