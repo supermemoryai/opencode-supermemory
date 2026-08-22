@@ -9,6 +9,8 @@ import { log } from "./logger.js";
 import { isFullyPrivate, stripPrivateContent } from "./privacy.js";
 import type { ResolvedTags } from "./tags.js";
 
+export const AUTOMATIC_CAPTURE_TIMEOUT_MS = 3_000;
+
 interface CaptureMessageInfo {
   id: string;
   role: string;
@@ -56,6 +58,7 @@ interface ConversationWriter {
     options?: {
       defaultEntityContext?: string;
       customId?: string;
+      timeoutMs?: number;
     },
   ) => Promise<{ success: boolean; error?: string }>;
 }
@@ -237,35 +240,44 @@ export function createCaptureHook(
     sessionID: string,
     batch: CaptureBatch,
     reason: "cadence" | "session_end",
-  ): Promise<void> {
+  ): Promise<boolean> {
     const captureId = getCaptureId(sessionID, batch);
-    if (completedCaptureIds.has(captureId)) return;
+    if (completedCaptureIds.has(captureId)) return true;
 
     const messages = batch.turns.flatMap((turn) => turn.messages);
     if (messages.length === 0) {
       completedCaptureIds.add(captureId);
-      return;
+      return true;
     }
 
-    const result = await memoryClient.ingestConversation(
-      `${sessionID}:${batch.startTurn}-${batch.endTurn}`,
-      messages,
-      [tags.canonical],
-      {
-        project: tags.projectName,
-        sm_project_id: tags.projectId,
-        sm_scope: "personal",
-        sm_capture_mode: "automatic",
-        captureReason: reason,
-        sessionId: sessionID,
-        turnStart: batch.startTurn,
-        turnEnd: batch.endTurn,
-      },
-      {
-        defaultEntityContext: AGENT_ENTITY_CONTEXT,
-        customId: captureId,
-      },
-    );
+    let result: { success: boolean; error?: string };
+    try {
+      result = await memoryClient.ingestConversation(
+        `${sessionID}:${batch.startTurn}-${batch.endTurn}`,
+        messages,
+        [tags.canonical],
+        {
+          project: tags.projectName,
+          sm_project_id: tags.projectId,
+          sm_scope: "personal",
+          sm_capture_mode: "automatic",
+          captureReason: reason,
+          sessionId: sessionID,
+          turnStart: batch.startTurn,
+          turnEnd: batch.endTurn,
+        },
+        {
+          defaultEntityContext: AGENT_ENTITY_CONTEXT,
+          customId: captureId,
+          timeoutMs: AUTOMATIC_CAPTURE_TIMEOUT_MS,
+        },
+      );
+    } catch (error) {
+      result = {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
 
     if (result.success) {
       completedCaptureIds.add(captureId);
@@ -275,7 +287,7 @@ export function createCaptureHook(
         startTurn: batch.startTurn,
         endTurn: batch.endTurn,
       });
-      return;
+      return true;
     }
 
     log("[capture] failed to save conversation batch", {
@@ -285,26 +297,42 @@ export function createCaptureHook(
       endTurn: batch.endTurn,
       error: result.error,
     });
+    return false;
   }
 
   async function captureCadence(
     sessionID: string,
     turns: CaptureTurn[],
-  ): Promise<void> {
+  ): Promise<boolean> {
+    let complete = true;
     for (const batch of buildCadenceBatches(turns, captureEveryNTurns)) {
-      await saveBatch(sessionID, batch, "cadence");
+      if (!(await saveBatch(sessionID, batch, "cadence"))) {
+        complete = false;
+      }
     }
+    return complete;
   }
 
-  async function captureSessionEnd(sessionID: string): Promise<void> {
-    const turns = snapshots.get(sessionID);
-    if (!turns) return;
-
-    await captureCadence(sessionID, turns);
-    const finalBatch = buildSessionEndBatch(turns, captureEveryNTurns);
-    if (finalBatch) {
-      await saveBatch(sessionID, finalBatch, "session_end");
+  async function captureSessionEnd(sessionID: string): Promise<boolean> {
+    let turns = snapshots.get(sessionID);
+    if (!turns) {
+      try {
+        turns = await refreshSnapshot(sessionID);
+      } catch (error) {
+        log("[capture] failed to read terminal session", {
+          sessionID,
+          error: String(error),
+        });
+        return false;
+      }
     }
+
+    const cadenceComplete = await captureCadence(sessionID, turns);
+    const finalBatch = buildSessionEndBatch(turns, captureEveryNTurns);
+    const finalComplete = finalBatch
+      ? await saveBatch(sessionID, finalBatch, "session_end")
+      : true;
+    return cadenceComplete && finalComplete;
   }
 
   async function runExclusive(
@@ -336,6 +364,7 @@ export function createCaptureHook(
       if (event.type === "session.idle") {
         const sessionID = props?.sessionID as string | undefined;
         if (!sessionID) return;
+        activeSessions.add(sessionID);
 
         await runExclusive(sessionID, async () => {
           try {
@@ -355,11 +384,13 @@ export function createCaptureHook(
         const sessionInfo = props?.info as { id?: string } | undefined;
         const sessionID = sessionInfo?.id;
         if (!sessionID) return;
+        activeSessions.add(sessionID);
 
         await runExclusive(sessionID, async () => {
-          await captureSessionEnd(sessionID);
-          snapshots.delete(sessionID);
-          activeSessions.delete(sessionID);
+          if (await captureSessionEnd(sessionID)) {
+            snapshots.delete(sessionID);
+            activeSessions.delete(sessionID);
+          }
         });
         return;
       }
@@ -368,9 +399,10 @@ export function createCaptureHook(
         await Promise.all(
           [...activeSessions].map((sessionID) =>
             runExclusive(sessionID, async () => {
-              await captureSessionEnd(sessionID);
-              snapshots.delete(sessionID);
-              activeSessions.delete(sessionID);
+              if (await captureSessionEnd(sessionID)) {
+                snapshots.delete(sessionID);
+                activeSessions.delete(sessionID);
+              }
             }),
           ),
         );
