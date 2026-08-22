@@ -115,8 +115,9 @@ export class RecallSessionCache {
 function formatDirectRecallContext(hits: RecallHit[]): string {
   return [
     "<supermemory-context>",
-    "Relevant memories automatically recalled for this prompt:",
-    ...hits.map((hit) => `- ${formatRecallHit(hit)}`),
+    "Relevant memories automatically recalled for this prompt. Every line marked ◪ comes from supermemory:",
+    ...hits.map((hit) => `- ◪ ${formatRecallHit(hit)}`),
+    "When one shapes your answer, credit it naturally with the ◪ prefix; if you name the source, say \"from supermemory\".",
     "Use these memories only when relevant. Search Supermemory for deeper context if needed.",
     "</supermemory-context>",
   ].join("\n");
@@ -130,17 +131,25 @@ export async function buildDirectRecallContext(options: {
   suppressTexts?: Iterable<string> | Promise<Iterable<string>>;
 }): Promise<string> {
   try {
+    const query = prepareRecallQuery(options.prompt);
+    // Begin the search before waiting for first-turn profile suppression. Both
+    // reads have the same timeout, so a cold prompt pays one network window.
+    const searchPromise = query
+      ? Promise.resolve()
+          .then(() => options.search(query))
+          .catch(() => null)
+      : null;
+
     if (options.suppressTexts) {
       options.cache.rememberTexts(
         options.sessionID,
         await options.suppressTexts,
       );
     }
-    const query = prepareRecallQuery(options.prompt);
     if (!query) return "";
 
-    const response = await options.search(query);
-    if (!response.success) return "";
+    const response = await searchPromise;
+    if (!response?.success) return "";
     const hits = normalizeRecallResults(response.results ?? []);
     const freshHits = options.cache.takeFresh(options.sessionID, hits);
     return freshHits.length > 0 ? formatDirectRecallContext(freshHits) : "";

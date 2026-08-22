@@ -7,9 +7,16 @@ export const MAX_RECALL_HIT_CHARS = 300;
 export interface RecallHit {
   result: SearchResultItem;
   text: string;
-  similarity: number;
+  similarity?: number;
   title?: string;
   filepath?: string;
+}
+
+function finiteSimilarity(result: SearchResultItem): number | undefined {
+  return [result.similarity, result.score].find(
+    (value): value is number =>
+      typeof value === "number" && Number.isFinite(value),
+  );
 }
 
 function nonEmptyString(value: unknown): string | undefined {
@@ -61,7 +68,7 @@ export function normalizeRecallResult(
       maxHitChars === undefined
         ? text
         : truncateHit(text, Math.max(1, maxHitChars)),
-    similarity: result.similarity ?? result.score ?? 0,
+    similarity: finiteSimilarity(result),
     title: getRecallResultTitle(result),
     filepath: getRecallResultFilepath(result),
   };
@@ -86,8 +93,15 @@ export function normalizeRecallResults(
   return results
     .map((result) => normalizeRecallResult(result, maxHitChars))
     .filter((hit): hit is RecallHit => hit !== null)
-    .filter((hit) => hit.similarity >= minSimilarity)
-    .sort((a, b) => b.similarity - a.similarity)
+    .filter(
+      (hit) =>
+        hit.similarity === undefined || hit.similarity >= minSimilarity,
+    )
+    .sort(
+      (a, b) =>
+        (b.similarity ?? Number.NEGATIVE_INFINITY) -
+        (a.similarity ?? Number.NEGATIVE_INFINITY),
+    )
     .filter((hit) => {
       const key = hit.text.toLowerCase().replace(/\s+/g, " ").trim();
       if (seen.has(key)) return false;
@@ -98,7 +112,11 @@ export function normalizeRecallResults(
 }
 
 export function formatRecallHit(hit: RecallHit): string {
-  const title = hit.title ? `${hit.title}: ` : "";
+  const title =
+    hit.title &&
+    !hit.text.toLocaleLowerCase().startsWith(hit.title.toLocaleLowerCase())
+      ? `${hit.title}: `
+      : "";
   const filepath = hit.filepath ? ` (${hit.filepath})` : "";
   return `${title}${hit.text}${filepath}`;
 }

@@ -4,7 +4,10 @@ import { tool } from "@opencode-ai/plugin";
 
 import { AGENT_ENTITY_CONTEXT } from "./services/entity-context.js";
 import { supermemoryClient } from "./services/client.js";
-import { formatContextForPrompt } from "./services/context.js";
+import {
+  formatContextForPrompt,
+  getInjectedProfileFactTexts,
+} from "./services/context.js";
 import { createCaptureHook } from "./services/capture.js";
 import {
   buildDirectRecallContext,
@@ -204,10 +207,7 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
                 suppressTexts: isFirstMessage
                   ? profileRequest.then((result) =>
                       result?.success && result.profile
-                        ? [
-                            ...result.profile.static,
-                            ...result.profile.dynamic,
-                          ]
+                        ? getInjectedProfileFactTexts(result)
                         : [],
                     )
                   : undefined,
@@ -615,7 +615,15 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
         await compactionHook.event(input);
       }
       if (captureHook) {
-        await captureHook.event(input);
+        if (input.event.type === "session.idle") {
+          void captureHook.event(input).catch((error) => {
+            log("[capture] background idle capture failed", {
+              error: String(error),
+            });
+          });
+        } else {
+          await captureHook.event(input);
+        }
       }
     },
   };
@@ -654,7 +662,9 @@ function formatSearchResults(
       const r = hit.result;
       const result = {
         content: formatRecallHit(hit),
-        similarity: Math.round(hit.similarity * 100),
+        ...(hit.similarity === undefined
+          ? {}
+          : { similarity: Math.round(hit.similarity * 100) }),
         ...(hit.title ? { title: hit.title } : {}),
         ...(hit.filepath ? { filepath: hit.filepath } : {}),
       };

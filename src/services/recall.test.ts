@@ -5,6 +5,7 @@ import {
   MAX_RECALL_QUERY_CHARS,
   RecallSessionCache,
 } from "./recall.js";
+import { getInjectedProfileFactTexts } from "./context.js";
 
 describe("direct recall", () => {
   test("applies prompt policy, fails open, and bounds session dedupe", async () => {
@@ -65,32 +66,53 @@ describe("direct recall", () => {
     ).toBe("");
   });
 
-  test("suppresses first-turn hits already injected from the profile", async () => {
+  test("starts first-turn search alongside profile and suppresses only injected facts", async () => {
     const cache = new RecallSessionCache();
-    const skippedContext = await buildDirectRecallContext({
-      prompt: "hello",
-      sessionID: "session-1",
-      cache,
-      suppressTexts: Promise.resolve(["Use Bun for all package scripts"]),
-      search: async () => {
-        throw new Error("short prompts must not search");
+    const profile = {
+      success: true,
+      profile: {
+        static: [
+          "Use Bun for all package scripts",
+          "This undisplayed profile fact may still be recalled",
+        ],
+        dynamic: [],
       },
+    };
+    let resolveSuppression!: (texts: string[]) => void;
+    const suppression = new Promise<string[]>((resolve) => {
+      resolveSuppression = resolve;
     });
-    const context = await buildDirectRecallContext({
+    let searchStarted = false;
+
+    const contextPromise = buildDirectRecallContext({
       prompt: "what did we decide about the build system",
       sessionID: "session-1",
       cache,
-      search: async () => ({
-        success: true,
-        results: [
-          { memory: "Use Bun for all package scripts", similarity: 0.9 },
-          { memory: "Run typecheck before build", similarity: 0.8 },
-        ],
-      }),
+      suppressTexts: suppression,
+      search: async () => {
+        searchStarted = true;
+        return {
+          success: true as const,
+          results: [
+            { memory: "Use Bun for all package scripts", similarity: 0.9 },
+            {
+              memory: "This undisplayed profile fact may still be recalled",
+              similarity: 0.85,
+            },
+            { memory: "Run typecheck before build", similarity: 0.8 },
+          ],
+        };
+      },
     });
+    await Promise.resolve();
 
-    expect(skippedContext).toBe("");
+    expect(searchStarted).toBe(true);
+    resolveSuppression(getInjectedProfileFactTexts(profile, 1));
+    const context = await contextPromise;
+
     expect(context).not.toContain("Use Bun for all package scripts");
+    expect(context).toContain("This undisplayed profile fact may still be recalled");
     expect(context).toContain("Run typecheck before build");
+    expect(context).toContain("◪");
   });
 });
