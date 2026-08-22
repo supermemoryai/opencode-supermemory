@@ -1,14 +1,12 @@
-import type { ProfileResponse } from "./client.js";
+import type { ProfileResponse, SearchResultItem } from "./client.js";
 import { CONFIG } from "../config.js";
-
-interface MemoryResultMinimal {
-  similarity?: number;
-  memory?: string;
-  chunk?: string;
-}
+import {
+  formatRecallHit,
+  normalizeRecallResults,
+} from "./recall-results.js";
 
 interface MemoriesResponseMinimal {
-  results?: MemoryResultMinimal[];
+  results?: SearchResultItem[];
 }
 
 function extractFactText(fact: unknown): string {
@@ -48,23 +46,21 @@ export function formatContextForPrompt(
     }
   }
 
-  const projectResults = projectMemories.results || [];
+  const projectResults = normalizeRecallResults(projectMemories.results || []);
   if (projectResults.length > 0) {
     parts.push("\nProject Knowledge:");
-    projectResults.forEach((mem) => {
-      const similarity = Math.round((mem.similarity ?? 0) * 100);
-      const content = mem.memory || mem.chunk || "";
-      parts.push(`- [${similarity}%] ${content}`);
+    projectResults.forEach((hit) => {
+      const similarity = Math.round(hit.similarity * 100);
+      parts.push(`- [${similarity}%] ${formatRecallHit(hit)}`);
     });
   }
 
-  const userResults = userMemories.results || [];
+  const userResults = normalizeRecallResults(userMemories.results || []);
   if (userResults.length > 0) {
     parts.push("\nRelevant Memories:");
-    userResults.forEach((mem) => {
-      const similarity = Math.round((mem.similarity ?? 0) * 100);
-      const content = mem.memory || mem.chunk || "";
-      parts.push(`- [${similarity}%] ${content}`);
+    userResults.forEach((hit) => {
+      const similarity = Math.round(hit.similarity * 100);
+      parts.push(`- [${similarity}%] ${formatRecallHit(hit)}`);
     });
   }
 

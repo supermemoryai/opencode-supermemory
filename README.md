@@ -251,7 +251,7 @@ Create `~/.config/opencode/supermemory.jsonc`:
   "baseUrl": "https://api.supermemory.ai",
 
   // Min similarity for memory retrieval (0-1)
-  "similarityThreshold": 0.6,
+  "similarityThreshold": 0.55,
 
   // Max memories injected per request
   "maxMemories": 5,

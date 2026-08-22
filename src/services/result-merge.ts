@@ -5,6 +5,7 @@ import type {
   SearchResponse,
   SearchResultItem,
 } from "./client.js";
+import { getRecallResultText } from "./recall-results.js";
 
 function normalize(value: unknown): string {
   return String(value ?? "").toLowerCase().trim();
@@ -20,17 +21,8 @@ function dedupe<T>(items: T[], getKey: (item: T) => string): T[] {
   });
 }
 
-function memoryText(result: SearchResultItem): string {
-  return (
-    result.memory ??
-    result.chunk ??
-    result.content ??
-    String(result.context ?? "")
-  );
-}
-
 function searchKey(result: SearchResultItem): string {
-  const content = normalize(memoryText(result));
+  const content = normalize(getRecallResultText(result));
   if (content) return `content:${content}`;
   return result.id ? `id:${result.id}` : "";
 }

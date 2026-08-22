@@ -7,6 +7,10 @@ import { supermemoryClient } from "./services/client.js";
 import { formatContextForPrompt } from "./services/context.js";
 import { createCaptureHook } from "./services/capture.js";
 import { buildRecallDirective } from "./services/recall.js";
+import {
+  formatRecallHit,
+  normalizeRecallResult,
+} from "./services/recall-results.js";
 import { getTags } from "./services/tags.js";
 import { stripPrivateContent, isFullyPrivate } from "./services/privacy.js";
 import { createCompactionHook, type CompactionContext } from "./services/compaction.js";
@@ -591,19 +595,39 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
 function formatSearchResults(
   query: string,
   scope: string | undefined,
-  results: { results?: Array<{ id?: string; memory?: string; chunk?: string; similarity?: number }> },
+  results: {
+    results?: Array<{
+      id?: string;
+      memory?: string;
+      chunk?: string;
+      content?: string;
+      text?: string;
+      context?: unknown;
+      similarity?: number;
+      score?: number;
+      title?: string;
+      filepath?: string;
+      metadata?: Record<string, unknown> | null;
+    }>;
+  },
   limit?: number
 ): string {
-  const memoryResults = results.results || [];
+  const memoryResults = (results.results || [])
+    .map((result) => normalizeRecallResult(result))
+    .filter((hit): hit is NonNullable<typeof hit> => hit !== null)
+    .slice(0, limit ?? 10);
   return JSON.stringify({
     success: true,
     query,
     scope,
     count: memoryResults.length,
-    results: memoryResults.slice(0, limit || 10).map((r) => {
+    results: memoryResults.map((hit) => {
+      const r = hit.result;
       const result = {
-        content: r.memory ?? r.chunk,
-        similarity: Math.round((r.similarity ?? 0) * 100),
+        content: formatRecallHit(hit),
+        similarity: Math.round(hit.similarity * 100),
+        ...(hit.title ? { title: hit.title } : {}),
+        ...(hit.filepath ? { filepath: hit.filepath } : {}),
       };
 
       return r.memory === undefined

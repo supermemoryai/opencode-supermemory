@@ -52,7 +52,7 @@ const DEFAULT_KEYWORD_PATTERNS = [
 ];
 
 const DEFAULTS: Required<Omit<SupermemoryConfig, "apiKey" | "baseUrl" | "userContainerTag" | "projectContainerTag" | "recallDirective">> = {
-  similarityThreshold: 0.6,
+  similarityThreshold: 0.55,
   maxMemories: 5,
   maxProjectMemories: 10,
   maxProfileItems: 5,

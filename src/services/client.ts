@@ -29,10 +29,12 @@ export interface SearchResultItem {
   memory?: string;
   content?: string;
   chunk?: string;
+  text?: string;
   context?: unknown;
   score?: number;
   similarity?: number;
   title?: string;
+  filepath?: string;
   updatedAt?: string;
   metadata?: Record<string, unknown> | null;
   containerTag?: string;
@@ -269,10 +271,6 @@ export class SupermemoryClient {
               result.searchResults.results as SearchResultItem[]
             ).map((item) => ({
               ...item,
-              memory:
-                item.memory ??
-                item.content ??
-                String(item.context ?? ""),
               containerTag,
             })),
             total: result.searchResults.total,
