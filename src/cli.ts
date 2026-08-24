@@ -614,7 +614,8 @@ async function switchOrganization(): Promise<number> {
   console.log("Opening Supermemory so you can select an organization...");
 
   const result = await switchOrganizationCredential({
-    authorize: () => startAuthFlow(),
+    authorize: () =>
+      startAuthFlow(undefined, { mode: "switch_organization" }),
     save: saveCredentials,
     defaultApiBaseUrl: DEFAULT_BASE_URL,
   });

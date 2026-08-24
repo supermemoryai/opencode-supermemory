@@ -83,7 +83,30 @@ export type AuthResult =
   | { success: true; apiKey: string; apiBaseUrl?: string }
   | { success: false; error: string };
 
-export function startAuthFlow(timeoutMs = AUTH_TIMEOUT): Promise<AuthResult> {
+export interface AuthFlowOptions {
+  mode?: "switch_organization";
+}
+
+export function buildAuthUrl(
+  callbackUrl: string,
+  options: AuthFlowOptions = {},
+): string {
+  const params = new URLSearchParams({
+    callback: callbackUrl,
+    client: CLIENT_NAME,
+    hostname: `opencode - ${hostname()}`,
+    os: `${platform()}-${arch()}`,
+    cwd: process.cwd(),
+    cli_version: PLUGIN_VERSION,
+  });
+  if (options.mode) params.set("mode", options.mode);
+  return `${AUTH_BASE_URL}?${params.toString()}`;
+}
+
+export function startAuthFlow(
+  timeoutMs = AUTH_TIMEOUT,
+  options: AuthFlowOptions = {},
+): Promise<AuthResult> {
   return new Promise((resolve) => {
     let resolved = false;
     const stateToken = randomBytes(16).toString("hex");
@@ -197,15 +220,7 @@ export function startAuthFlow(timeoutMs = AUTH_TIMEOUT): Promise<AuthResult> {
     server.listen(0, "127.0.0.1", () => {
       const { port } = server.address() as AddressInfo;
       const callbackUrl = `http://127.0.0.1:${port}/callback?state=${stateToken}`;
-      const params = new URLSearchParams({
-        callback: callbackUrl,
-        client: CLIENT_NAME,
-        hostname: `opencode - ${hostname()}`,
-        os: `${platform()}-${arch()}`,
-        cwd: process.cwd(),
-        cli_version: PLUGIN_VERSION,
-      });
-      const authUrl = `${AUTH_BASE_URL}?${params.toString()}`;
+      const authUrl = buildAuthUrl(callbackUrl, options);
 
       console.log("Opening browser for authentication...");
       console.log(`If it doesn't open, visit: ${authUrl}`);
