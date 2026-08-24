@@ -4,14 +4,36 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import * as readline from "node:readline";
 import { stripJsoncComments } from "./services/jsonc.js";
-import { startAuthFlow, clearCredentials, loadCredentials, CREDENTIALS_FILE } from "./services/auth.js";
-import { CONFIG, CONFIG_FILE, SUPERMEMORY_API_KEY, getApiBaseUrl, isConfigured, writeInstallDefaults } from "./config.js";
+import {
+  startAuthFlow,
+  clearCredentials,
+  loadCredentials,
+  saveCredentials,
+  CREDENTIALS_FILE,
+} from "./services/auth.js";
+import {
+  CONFIG,
+  CONFIG_FILE,
+  DEFAULT_BASE_URL,
+  SUPERMEMORY_API_KEY,
+  getApiBaseUrl,
+  isConfigured,
+  writeInstallDefaults,
+} from "./config.js";
 import { SupermemoryClient } from "./services/client.js";
 import { getTags } from "./services/tags.js";
+import {
+  getCredentialOverrideWarnings,
+  switchOrganizationCredential,
+} from "./services/organization-switch.js";
 
 const OPENCODE_CONFIG_DIR = join(homedir(), ".config", "opencode");
 const OPENCODE_COMMAND_DIR = join(OPENCODE_CONFIG_DIR, "command");
 const OH_MY_OPENCODE_CONFIG = join(OPENCODE_CONFIG_DIR, "oh-my-opencode.json");
+const SUPERMEMORY_CONFIG_FILES = [
+  join(OPENCODE_CONFIG_DIR, "supermemory.jsonc"),
+  join(OPENCODE_CONFIG_DIR, "supermemory.json"),
+];
 const PLUGIN_NAME = "opencode-supermemory@latest";
 const DEFAULT_CONFIG_FILE = CONFIG_FILE ?? join(OPENCODE_CONFIG_DIR, "supermemory.json");
 
@@ -180,13 +202,36 @@ bunx opencode-supermemory@latest login
 \`\`\`
 
 This will:
-1. Start a local server on port 19877
+1. Start a temporary local callback
 2. Open the browser to Supermemory's authentication page
-3. After the user logs in, save credentials to ~/.supermemory-opencode/credentials.json
+3. Let the user select an organization
+4. Save credentials to ~/.supermemory-opencode/credentials.json
 
 Wait for the command to complete, then inform the user whether authentication succeeded or failed.
 
 If the user wants to log out instead, tell them to use the /supermemory-logout command.
+`;
+
+const SUPERMEMORY_SWITCH_ORGANIZATION_COMMAND = `---
+description: Switch the organization used by Supermemory
+---
+
+# Switch Supermemory Organization
+
+Run this command to let the user select which Supermemory organization OpenCode uses:
+
+\`\`\`bash
+bunx opencode-supermemory@latest switch-organization
+\`\`\`
+
+This opens the browser organization picker even when OpenCode is already authenticated. Existing credentials remain unchanged if the user cancels or verification fails.
+
+After the command completes:
+1. Report the verified organization shown by the command.
+2. Relay any credential override warnings.
+3. Tell the user to restart or reload OpenCode because the current process may retain the credential it loaded at startup.
+
+Never print the full API key.
 `;
 
 const SUPERMEMORY_LOGOUT_COMMAND = `---
@@ -333,6 +378,16 @@ function createCommands(): boolean {
   writeFileSync(loginPath, SUPERMEMORY_LOGIN_COMMAND);
   console.log(`✓ Created /supermemory-login command`);
 
+  const switchOrganizationPath = join(
+    OPENCODE_COMMAND_DIR,
+    "supermemory-switch-organization.md",
+  );
+  writeFileSync(
+    switchOrganizationPath,
+    SUPERMEMORY_SWITCH_ORGANIZATION_COMMAND,
+  );
+  console.log(`✓ Created /supermemory-switch-organization command`);
+
   const logoutPath = join(OPENCODE_COMMAND_DIR, "supermemory-logout.md");
   writeFileSync(logoutPath, SUPERMEMORY_LOGOUT_COMMAND);
   console.log(`✓ Created /supermemory-logout command`);
@@ -434,7 +489,7 @@ async function install(options: InstallOptions): Promise<number> {
   }
 
   // Step 2: Create commands
-  console.log("\nStep 2: Create /supermemory-init, /supermemory-login, /supermemory-logout, and /supermemory-status commands");
+  console.log("\nStep 2: Create /supermemory-init, /supermemory-login, /supermemory-switch-organization, /supermemory-logout, and /supermemory-status commands");
   if (options.tui) {
     const shouldCreate = await confirm(rl!, "Add supermemory commands?");
     if (!shouldCreate) {
@@ -493,16 +548,28 @@ async function install(options: InstallOptions): Promise<number> {
 async function login(): Promise<number> {
   const existing = loadCredentials();
   if (existing) {
-    console.log("Already authenticated. Use 'logout' first to re-authenticate.");
+    console.log(
+      "Already authenticated. Use 'switch-organization' to choose another organization.",
+    );
     return 0;
   }
 
   const result = await startAuthFlow();
 
   if (result.success) {
-    console.log("\n✓ Successfully authenticated with Supermemory!");
-    console.log("Restart OpenCode to activate.\n");
-    return 0;
+    try {
+      saveCredentials(result.apiKey, result.apiBaseUrl);
+      console.log("\n✓ Successfully authenticated with Supermemory!");
+      console.log("Restart OpenCode to activate.\n");
+      return 0;
+    } catch (error) {
+      console.error(
+        `\n✗ Authentication succeeded, but credentials could not be saved: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return 1;
+    }
   } else {
     console.error(`\n✗ Authentication failed: ${result.error}`);
     return 1;
@@ -515,21 +582,70 @@ function maskKey(key: string | undefined): string {
   return `${key.slice(0, 6)}...${key.slice(-4)}`;
 }
 
-function getConfiguredApiKeyFromFile(): string | undefined {
-  try {
-    if (!existsSync(DEFAULT_CONFIG_FILE)) return undefined;
-    const parsed = JSON.parse(readFileSync(DEFAULT_CONFIG_FILE, "utf-8")) as { apiKey?: string };
-    return parsed.apiKey;
-  } catch {
-    return undefined;
+function getConfiguredApiKeyFromFile():
+  | { apiKey: string; path: string }
+  | undefined {
+  for (const path of SUPERMEMORY_CONFIG_FILES) {
+    try {
+      if (!existsSync(path)) continue;
+      const parsed = JSON.parse(
+        stripJsoncComments(readFileSync(path, "utf-8")),
+      ) as { apiKey?: unknown };
+      if (typeof parsed.apiKey === "string" && parsed.apiKey) {
+        return { apiKey: parsed.apiKey, path };
+      }
+    } catch {
+      continue;
+    }
   }
+  return undefined;
 }
 
 function getKeySource(): string {
   if (process.env.SUPERMEMORY_API_KEY) return "SUPERMEMORY_API_KEY env var";
-  if (getConfiguredApiKeyFromFile()) return DEFAULT_CONFIG_FILE;
+  const configuredApiKey = getConfiguredApiKeyFromFile();
+  if (configuredApiKey) return configuredApiKey.path;
   if (loadCredentials()) return CREDENTIALS_FILE;
   return "not configured";
+}
+
+async function switchOrganization(): Promise<number> {
+  const hadExistingCredentials = loadCredentials() !== null;
+  console.log("Opening Supermemory so you can select an organization...");
+
+  const result = await switchOrganizationCredential({
+    authorize: () => startAuthFlow(),
+    save: saveCredentials,
+    defaultApiBaseUrl: DEFAULT_BASE_URL,
+  });
+
+  if (!result.success) {
+    console.error(`\n✗ Organization switch failed: ${result.error}`);
+    if (hadExistingCredentials) {
+      console.log("Your existing browser credentials were kept unchanged.");
+    }
+    return 1;
+  }
+
+  const organization = result.organization.name
+    ? `${result.organization.name} (${result.organization.id})`
+    : result.organization.id;
+  console.log(`\n✓ Supermemory organization switched to ${organization}.`);
+  console.log(`Verified with ${result.apiBaseUrl}/v3/session.`);
+
+  const configuredApiKey = getConfiguredApiKeyFromFile();
+  const warnings = getCredentialOverrideWarnings({
+    environmentApiKey: Boolean(process.env.SUPERMEMORY_API_KEY),
+    configApiKeyPath: configuredApiKey?.path,
+  });
+  for (const warning of warnings) {
+    console.warn(`⚠ ${warning}`);
+  }
+
+  console.log(
+    "Restart or reload OpenCode before continuing; the current process may still be using the credential it loaded at startup.\n",
+  );
+  return 0;
 }
 
 function getDevTlsHint(apiUrl: string): string | null {
@@ -656,12 +772,15 @@ Commands:
     --no-tui                     Non-interactive mode (for LLM agents)
     --disable-context-recovery   Disable Oh My OpenCode's context hook
   login      Authenticate with Supermemory (opens browser)
+  switch-organization
+             Select and verify the organization used by Supermemory
   logout     Clear stored credentials
   status     Show Supermemory connection status
 
 Examples:
   bunx opencode-supermemory@latest install
   bunx opencode-supermemory@latest login
+  bunx opencode-supermemory@latest switch-organization
   bunx opencode-supermemory@latest logout
   bunx opencode-supermemory@latest status
 `);
@@ -685,6 +804,8 @@ if (args[0] === "install") {
   install({ tui: !noTui, disableAutoCompact }).then((code) => process.exit(code));
 } else if (args[0] === "login") {
   login().then((code) => process.exit(code));
+} else if (args[0] === "switch-organization" || args[0] === "switch-org") {
+  switchOrganization().then((code) => process.exit(code));
 } else if (args[0] === "logout") {
   process.exit(logout());
 } else if (args[0] === "status") {

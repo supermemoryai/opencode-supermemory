@@ -24,6 +24,14 @@ Check the connection any time:
 bunx opencode-supermemory@latest status
 ```
 
+To select a different organization later:
+
+```bash
+bunx opencode-supermemory@latest switch-organization
+```
+
+You can also ask the agent to run `/supermemory-switch-organization`.
+
 **Or let your agent do it** - paste this into OpenCode:
 
 ```
@@ -46,7 +54,9 @@ bunx opencode-supermemory@latest install --no-tui
 This will:
 
 - Register the plugin in `~/.config/opencode/opencode.jsonc`
-- Create the `/supermemory-init` command
+- Create the `/supermemory-init`, `/supermemory-login`,
+  `/supermemory-switch-organization`, `/supermemory-logout`, and
+  `/supermemory-status` commands
 
 #### Step 2: Verify the config
 
@@ -118,6 +128,24 @@ If it is not connected, check:
 Run `/supermemory-init` to have the agent explore and memorize the codebase.
 
 </details>
+
+## Switching Organizations
+
+Run the browser organization picker again without logging out:
+
+```bash
+bunx opencode-supermemory@latest switch-organization
+```
+
+Or run `/supermemory-switch-organization` inside OpenCode. The command verifies
+the selected credential with `/v3/session` and prints the organization before it
+replaces the stored browser credential. Cancelling, timing out, or failing
+verification leaves the previous credential unchanged.
+
+Restart or reload OpenCode after a successful switch because the running plugin
+may still hold the credential it loaded at startup. If `SUPERMEMORY_API_KEY` or
+an `apiKey` in `~/.config/opencode/supermemory.jsonc`/`supermemory.json` is set,
+that value takes precedence; the switch command prints a warning in that case.
 
 ## Features
 
@@ -289,7 +317,8 @@ Create `~/.config/opencode/supermemory.jsonc`:
 }
 ```
 
-All fields optional. Env var `SUPERMEMORY_API_KEY` takes precedence over config file.
+All fields optional. `SUPERMEMORY_API_KEY` takes precedence over the config file,
+which takes precedence over credentials created by browser authentication.
 
 ### Container Tag Selection
 

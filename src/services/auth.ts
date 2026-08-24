@@ -1,14 +1,22 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { arch, homedir, hostname, platform } from "node:os";
 import { randomBytes } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { openUrl } from "./openUrl.js";
+import { PLUGIN_VERSION } from "../version.js";
 
 const CREDENTIALS_DIR = join(homedir(), ".supermemory-opencode");
 export const CREDENTIALS_FILE = join(CREDENTIALS_DIR, "credentials.json");
-const AUTH_BASE_URL = process.env.SUPERMEMORY_AUTH_URL || "https://app.supermemory.ai/auth/agent-connect";
+const AUTH_BASE_URL = process.env.SUPERMEMORY_AUTH_URL || "https://app.supermemory.ai/auth/connect";
 const AUTH_TIMEOUT = Number(process.env.SUPERMEMORY_AUTH_TIMEOUT) || 5 * 60_000;
 const CLIENT_NAME = "opencode";
 
@@ -28,7 +36,7 @@ export function loadCredentials(): Credentials | null {
   }
 }
 
-function normalizeApiBaseUrl(apiBaseUrl: string | null | undefined): string | undefined {
+export function normalizeApiBaseUrl(apiBaseUrl: string | null | undefined): string | undefined {
   if (!apiBaseUrl) return undefined;
   try {
     const url = new URL(apiBaseUrl);
@@ -50,7 +58,19 @@ export function saveCredentials(apiKey: string, apiBaseUrl?: string): void {
   };
   const normalizedApiBaseUrl = normalizeApiBaseUrl(apiBaseUrl);
   if (normalizedApiBaseUrl) credentials.apiBaseUrl = normalizedApiBaseUrl;
-  writeFileSync(CREDENTIALS_FILE, JSON.stringify(credentials, null, 2), { mode: 0o600 });
+
+  const temporaryFile = join(
+    CREDENTIALS_DIR,
+    `.credentials-${process.pid}-${randomBytes(6).toString("hex")}.tmp`,
+  );
+  try {
+    writeFileSync(temporaryFile, JSON.stringify(credentials, null, 2), {
+      mode: 0o600,
+    });
+    renameSync(temporaryFile, CREDENTIALS_FILE);
+  } finally {
+    if (existsSync(temporaryFile)) rmSync(temporaryFile);
+  }
 }
 
 export function clearCredentials(): boolean {
@@ -59,11 +79,9 @@ export function clearCredentials(): boolean {
   return true;
 }
 
-export interface AuthResult {
-  success: boolean;
-  apiKey?: string;
-  error?: string;
-}
+export type AuthResult =
+  | { success: true; apiKey: string; apiBaseUrl?: string }
+  | { success: false; error: string };
 
 export function startAuthFlow(timeoutMs = AUTH_TIMEOUT): Promise<AuthResult> {
   return new Promise((resolve) => {
@@ -91,27 +109,22 @@ export function startAuthFlow(timeoutMs = AUTH_TIMEOUT): Promise<AuthResult> {
             </body>
             </html>
           `);
-          resolved = true;
-          clearTimeout(timer);
-          server.close();
-          resolve({ success: false, error: "Invalid auth state" });
           return;
         }
 
-        const apiKey = url.searchParams.get("apikey") || url.searchParams.get("api_key");
-        const apiBaseUrl = url.searchParams.get("api_url") || url.searchParams.get("api_base_url");
-
-        if (apiKey?.startsWith("sm_")) {
-          saveCredentials(apiKey, apiBaseUrl ?? undefined);
-          res.writeHead(200, { "Content-Type": "text/html" });
+        const authError =
+          url.searchParams.get("error_description") ||
+          url.searchParams.get("error");
+        if (authError) {
+          res.writeHead(400, { "Content-Type": "text/html" });
           res.end(`
             <!DOCTYPE html>
             <html>
-            <head><title>Success</title></head>
+            <head><title>Cancelled</title></head>
             <body style="font-family: system-ui; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #0a0a0a; color: #fafafa;">
               <div style="text-align: center;">
-                <h1 style="color: #22c55e;">Connected!</h1>
-                <p>You can close this window and return to your terminal.</p>
+                <h1>Connection Cancelled</h1>
+                <p>Your existing credentials were not changed.</p>
               </div>
             </body>
             </html>
@@ -119,7 +132,35 @@ export function startAuthFlow(timeoutMs = AUTH_TIMEOUT): Promise<AuthResult> {
           resolved = true;
           clearTimeout(timer);
           server.close();
-          resolve({ success: true, apiKey });
+          resolve({ success: false, error: authError });
+          return;
+        }
+
+        const apiKey = url.searchParams.get("apikey") || url.searchParams.get("api_key");
+        const apiBaseUrl = url.searchParams.get("api_url") || url.searchParams.get("api_base_url");
+
+        if (apiKey?.startsWith("sm_")) {
+          res.writeHead(200, { "Content-Type": "text/html" });
+          res.end(`
+            <!DOCTYPE html>
+            <html>
+            <head><title>Success</title></head>
+            <body style="font-family: system-ui; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #0a0a0a; color: #fafafa;">
+              <div style="text-align: center;">
+                <h1 style="color: #22c55e;">Authorization Received!</h1>
+                <p>Return to your terminal to finish verification.</p>
+              </div>
+            </body>
+            </html>
+          `);
+          resolved = true;
+          clearTimeout(timer);
+          server.close();
+          resolve({
+            success: true,
+            apiKey,
+            apiBaseUrl: normalizeApiBaseUrl(apiBaseUrl),
+          });
         } else {
           res.writeHead(400, { "Content-Type": "text/html" });
           res.end(`
@@ -162,7 +203,7 @@ export function startAuthFlow(timeoutMs = AUTH_TIMEOUT): Promise<AuthResult> {
         hostname: `opencode - ${hostname()}`,
         os: `${platform()}-${arch()}`,
         cwd: process.cwd(),
-        cli_version: "2.0.10",
+        cli_version: PLUGIN_VERSION,
       });
       const authUrl = `${AUTH_BASE_URL}?${params.toString()}`;
 
