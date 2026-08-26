@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
 import * as readline from "node:readline";
 import { stripJsoncComments } from "./services/jsonc.js";
 import { startAuthFlow, clearCredentials, loadCredentials, CREDENTIALS_FILE } from "./services/auth.js";
 import { CONFIG, CONFIG_FILE, SUPERMEMORY_API_KEY, getApiBaseUrl, isConfigured, writeInstallDefaults } from "./config.js";
-import { SupermemoryClient } from "./services/client.js";
 import { getTags } from "./services/tags.js";
 
 const OPENCODE_CONFIG_DIR = join(homedir(), ".config", "opencode");
@@ -16,195 +16,24 @@ const OH_MY_OPENCODE_CONFIG = join(OPENCODE_CONFIG_DIR, "oh-my-opencode.json");
 const PLUGIN_NAME = "opencode-supermemory@latest";
 const DEFAULT_CONFIG_FILE = CONFIG_FILE ?? join(OPENCODE_CONFIG_DIR, "supermemory.json");
 
-const SUPERMEMORY_INIT_COMMAND = `---
-description: Initialize Supermemory with comprehensive codebase knowledge
----
-
-# Initializing Supermemory
-
-You are initializing persistent memory for this codebase. This is not just data collection - you're building context that will make you significantly more effective across all future sessions.
-
-## Understanding Context
-
-You are a **stateful** coding agent. Users expect to work with you over extended periods - potentially the entire lifecycle of a project. Your memory is how you get better over time and maintain continuity.
-
-## What to Remember
-
-### 1. Procedures (Rules & Workflows)
-Explicit rules that should always be followed:
-- "Never commit directly to main - always use feature branches"
-- "Always run lint before tests"
-- "Use conventional commits format"
-
-### 2. Preferences (Style & Conventions)  
-Project and user coding style:
-- "Prefer functional components over class components"
-- "Use early returns instead of nested conditionals"
-- "Always add JSDoc to exported functions"
-
-### 3. Architecture & Context
-How the codebase works and why:
-- "Auth system was refactored in v2.0 - old patterns deprecated"
-- "The monorepo used to have 3 modules before consolidation"
-- "This pagination bug was fixed before - similar to PR #234"
-
-## Memory Scopes
-
-**Project-scoped** (\`scope: "project"\`):
-- Build/test/lint commands
-- Architecture and key directories
-- Team conventions specific to this codebase
-- Technology stack and framework choices
-- Known issues and their solutions
-
-**User-scoped** (\`scope: "user"\`):
-- Personal coding preferences relevant to this project
-- Communication style preferences
-- General workflow habits
-
-## Research Approach
-
-This is a **deep research** initialization. Take your time and be thorough (~50+ tool calls). The goal is to genuinely understand the project, not just collect surface-level facts.
-
-**What to uncover:**
-- Tech stack and dependencies (explicit and implicit)
-- Project structure and architecture
-- Build/test/deploy commands and workflows
-- Contributors & team dynamics (who works on what?)
-- Commit conventions and branching strategy
-- Code evolution (major refactors, architecture changes)
-- Pain points (areas with lots of bug fixes)
-- Implicit conventions not documented anywhere
-
-## Research Techniques
-
-### File-based
-- README.md, CONTRIBUTING.md, AGENTS.md, CLAUDE.md
-- Package manifests (package.json, Cargo.toml, pyproject.toml, go.mod)
-- Config files (.eslintrc, tsconfig.json, .prettierrc)
-- CI/CD configs (.github/workflows/)
-
-### Git-based
-- \`git log --oneline -20\` - Recent history
-- \`git branch -a\` - Branching strategy  
-- \`git log --format="%s" -50\` - Commit conventions
-- \`git shortlog -sn --all | head -10\` - Main contributors
-
-### Explore Agent
-Fire parallel explore queries for broad understanding:
-\`\`\`
-Task(explore, "What is the tech stack and key dependencies?")
-Task(explore, "What is the project structure? Key directories?")
-Task(explore, "How do you build, test, and run this project?")
-Task(explore, "What are the main architectural patterns?")
-Task(explore, "What conventions or patterns are used?")
-\`\`\`
-
-## How to Do Thorough Research
-
-**Don't just collect data - analyze and cross-reference.**
-
-Bad (shallow):
-- Run commands, copy output
-- List facts without understanding
-
-Good (thorough):
-- Cross-reference findings (if inconsistent, dig deeper)
-- Resolve ambiguities (don't leave questions unanswered)
-- Read actual file content, not just names
-- Look for patterns (what do commits tell you about workflow?)
-- Think like a new team member - what would you want to know?
-
-## Saving Memories
-
-Use the \`supermemory\` tool for each distinct insight:
-
-\`\`\`
-supermemory(mode: "add", content: "...", type: "...", scope: "project")
-\`\`\`
-
-**Types:**
-- \`project-config\` - tech stack, commands, tooling
-- \`architecture\` - codebase structure, key components, data flow
-- \`learned-pattern\` - conventions specific to this codebase
-- \`error-solution\` - known issues and their fixes
-- \`preference\` - coding style preferences (use with user scope)
-
-**Guidelines:**
-- Save each distinct insight as a separate memory
-- Be concise but include enough context to be useful
-- Include the "why" not just the "what" when relevant
-- Update memories incrementally as you research (don't wait until the end)
-
-**Good memories:**
-- "Uses Bun runtime and package manager. Commands: bun install, bun run dev, bun test"
-- "API routes in src/routes/, handlers in src/handlers/. Hono framework."
-- "Auth uses Redis sessions, not JWT. Implementation in src/lib/auth.ts"
-- "Never use \`any\` type - strict TypeScript. Use \`unknown\` and narrow."
-- "Database migrations must be backward compatible - we do rolling deploys"
-
-## Upfront Questions
-
-Before diving in, ask:
-1. "Any specific rules I should always follow?"
-2. "Preferences for how I communicate? (terse/detailed)"
-
-## Reflection Phase
-
-Before finishing, reflect:
-1. **Completeness**: Did you cover commands, architecture, conventions, gotchas?
-2. **Quality**: Are memories concise and searchable?
-3. **Scope**: Did you correctly separate project vs user knowledge?
-
-Then ask: "I've initialized memory with X insights. Want me to continue refining, or is this good?"
-
-## Your Task
-
-1. Ask upfront questions (research depth, rules, preferences)
-2. Check existing memories: \`supermemory(mode: "list", scope: "project")\`
-3. Research based on chosen depth
-4. Save memories incrementally as you discover insights
-5. Reflect and verify completeness
-6. Summarize what was learned and ask if user wants refinement
-`;
-
 const SUPERMEMORY_LOGIN_COMMAND = `---
-description: Authenticate with Supermemory via browser
+description: Connect OpenCode to Supermemory
 ---
 
 # Supermemory Login
 
-Run this command to authenticate the user with Supermemory:
+Run the browser authentication flow:
 
 \`\`\`bash
 bunx opencode-supermemory@latest login
 \`\`\`
 
-This will:
-1. Start a local server on port 19877
-2. Open the browser to Supermemory's authentication page
-3. After the user logs in, save credentials to ~/.supermemory-opencode/credentials.json
+Wait for authentication to finish, then tell the user to restart OpenCode so the plugin and hosted MCP connection load the new credentials.
 
-Wait for the command to complete, then inform the user whether authentication succeeded or failed.
+If the command says the user is already authenticated, run \`bunx opencode-supermemory@latest status\` and report the result instead of clearing credentials automatically.
 
-If the user wants to log out instead, tell them to use the /supermemory-logout command.
-`;
-
-const SUPERMEMORY_LOGOUT_COMMAND = `---
-description: Log out from Supermemory and clear credentials
----
-
-# Supermemory Logout
-
-Run this command to log out and clear Supermemory credentials:
-
-\`\`\`bash
-bunx opencode-supermemory@latest logout
-\`\`\`
-
-This will remove the saved credentials from ~/.supermemory-opencode/credentials.json.
-
-Inform the user whether logout succeeded and that they'll need to run /supermemory-login to re-authenticate.
+Never print the full API key.
+Never recommend disabling TLS verification.
 `;
 
 const SUPERMEMORY_STATUS_COMMAND = `---
@@ -219,9 +48,12 @@ Run this command to check whether OpenCode is connected to Supermemory:
 bunx opencode-supermemory@latest status
 \`\`\`
 
-Report the connection status, credential source, API URL, and account information if available.
+Then call the \`supermemory_whoAmI\` MCP tool.
+
+Report API reachability and MCP reachability separately. If \`whoAmI\` is unavailable, say that the MCP tool is unavailable in this OpenCode session and recommend restarting OpenCode. Do not describe that as an API failure.
 
 Never print the full API key.
+Never recommend disabling TLS verification.
 `;
 
 function createReadline(): readline.Interface {
@@ -254,14 +86,33 @@ function findOpencodeConfig(): string | null {
   return null;
 }
 
+function isSupermemoryPluginSpecifier(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  if (/^opencode-supermemory(?:@|$)/.test(value)) return true;
+  if (!value.startsWith("file://")) return false;
+
+  try {
+    const pluginPath = fileURLToPath(value);
+    const candidates = [
+      join(pluginPath, "package.json"),
+      join(pluginPath, "..", "package.json"),
+      join(pluginPath, "..", "..", "package.json"),
+    ];
+    return candidates.some((packagePath) => {
+      if (!existsSync(packagePath)) return false;
+      const packageJson = JSON.parse(readFileSync(packagePath, "utf-8")) as {
+        name?: unknown;
+      };
+      return packageJson.name === "opencode-supermemory";
+    });
+  } catch {
+    return false;
+  }
+}
+
 function addPluginToConfig(configPath: string): boolean {
   try {
     const content = readFileSync(configPath, "utf-8");
-    
-    if (content.includes("opencode-supermemory")) {
-      console.log("✓ Plugin already registered in config");
-      return true;
-    }
 
     const jsonContent = stripJsoncComments(content);
     let config: Record<string, unknown>;
@@ -273,7 +124,11 @@ function addPluginToConfig(configPath: string): boolean {
       return false;
     }
 
-    const plugins = (config.plugin as string[]) || [];
+    const plugins = Array.isArray(config.plugin) ? config.plugin : [];
+    if (plugins.some(isSupermemoryPluginSpecifier)) {
+      console.log("✓ Plugin already registered in config");
+      return true;
+    }
     plugins.push(PLUGIN_NAME);
     config.plugin = plugins;
 
@@ -343,20 +198,21 @@ function configureTuiPlugin(): boolean {
   return true;
 }
 
-function createCommands(): boolean {
+function configureCommands(): boolean {
   mkdirSync(OPENCODE_COMMAND_DIR, { recursive: true });
 
-  const initPath = join(OPENCODE_COMMAND_DIR, "supermemory-init.md");
-  writeFileSync(initPath, SUPERMEMORY_INIT_COMMAND);
-  console.log(`✓ Created /supermemory-init command`);
+  for (const name of [
+    "supermemory-init.md",
+    "supermemory-logout.md",
+    "supermemory-switch-organization.md",
+  ]) {
+    rmSync(join(OPENCODE_COMMAND_DIR, name), { force: true });
+  }
+  console.log("✓ Removed legacy Supermemory commands");
 
   const loginPath = join(OPENCODE_COMMAND_DIR, "supermemory-login.md");
   writeFileSync(loginPath, SUPERMEMORY_LOGIN_COMMAND);
   console.log(`✓ Created /supermemory-login command`);
-
-  const logoutPath = join(OPENCODE_COMMAND_DIR, "supermemory-logout.md");
-  writeFileSync(logoutPath, SUPERMEMORY_LOGOUT_COMMAND);
-  console.log(`✓ Created /supermemory-logout command`);
 
   const statusPath = join(OPENCODE_COMMAND_DIR, "supermemory-status.md");
   writeFileSync(statusPath, SUPERMEMORY_STATUS_COMMAND);
@@ -456,18 +312,9 @@ async function install(options: InstallOptions): Promise<number> {
 
   configureTuiPlugin();
 
-  // Step 2: Create commands
-  console.log("\nStep 2: Create /supermemory-init, /supermemory-login, /supermemory-logout, and /supermemory-status commands");
-  if (options.tui) {
-    const shouldCreate = await confirm(rl!, "Add supermemory commands?");
-    if (!shouldCreate) {
-      console.log("Skipped.");
-    } else {
-      createCommands();
-    }
-  } else {
-    createCommands();
-  }
+  // Step 2: Keep authentication and diagnostics discoverable. Memory tools come from MCP.
+  console.log("\nStep 2: Configure /supermemory-login and /supermemory-status");
+  configureCommands();
 
   // Step 3: Configure Oh My OpenCode (if installed)
   if (isOhMyOpencodeInstalled()) {
@@ -557,8 +404,7 @@ function getKeySource(): string {
 
 function getDevTlsHint(apiUrl: string): string | null {
   if (!apiUrl.includes(".dev.supermemory.ai")) return null;
-  if (process.env.NODE_EXTRA_CA_CERTS) return null;
-  return "Dev API TLS: set NODE_EXTRA_CA_CERTS to your Portless CA before starting OpenCode.";
+  return "The saved credential points to a development API endpoint. Do not disable TLS verification; run `bunx opencode-supermemory@latest logout` followed by `bunx opencode-supermemory@latest login` to obtain fresh production credentials.";
 }
 
 async function fetchJson(apiUrl: string, path: string): Promise<unknown | null> {
@@ -569,11 +415,65 @@ async function fetchJson(apiUrl: string, path: string): Promise<unknown | null> 
         Authorization: `Bearer ${SUPERMEMORY_API_KEY}`,
         "x-sm-source": "opencode",
       },
+      signal: AbortSignal.timeout(8_000),
     });
     if (!response.ok) return null;
     return await response.json();
   } catch {
     return null;
+  }
+}
+
+interface ApiProbe {
+  connected: boolean;
+  status: number | null;
+  detail: string;
+}
+
+async function probeApi(apiUrl: string, containerTag: string): Promise<ApiProbe> {
+  if (!SUPERMEMORY_API_KEY) {
+    return { connected: false, status: null, detail: "not attempted; no API key" };
+  }
+
+  try {
+    const response = await fetch(`${apiUrl}/v4/profile`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${SUPERMEMORY_API_KEY}`,
+        "Content-Type": "application/json",
+        "x-sm-source": "opencode",
+      },
+      body: JSON.stringify({
+        containerTag,
+        q: "connectivity probe",
+      }),
+      signal: AbortSignal.timeout(8_000),
+    });
+
+    if (response.status === 200 || response.status === 404) {
+      return {
+        connected: true,
+        status: response.status,
+        detail: response.status === 200
+          ? "reachable, key valid"
+          : "reachable, key valid; no profile data yet",
+      };
+    }
+    if (response.status === 401 || response.status === 403) {
+      return {
+        connected: false,
+        status: response.status,
+        detail: "reachable, key rejected",
+      };
+    }
+    return {
+      connected: false,
+      status: response.status,
+      detail: "reachable, unexpected response",
+    };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return { connected: false, status: null, detail: `network error: ${detail}` };
   }
 }
 
@@ -600,35 +500,31 @@ async function status(): Promise<number> {
 
   lines.push("supermemory status");
   lines.push("");
+  lines.push(`Authenticated: ${isConfigured() ? "yes" : "no"}`);
   lines.push(`Connected: ${isConfigured() ? "checking..." : "no"}`);
   lines.push(`API key: ${maskKey(SUPERMEMORY_API_KEY)} (${getKeySource()})`);
   lines.push(`API URL: ${apiUrl}`);
-  lines.push("Memory scope: unified project container with personal/project metadata");
-  lines.push(`Recall mode: ${CONFIG.recallMode}`);
-  lines.push(`Recall directive: ${CONFIG.recallMode === "advisory" && CONFIG.recallDirective ? "custom" : "default"}`);
-  lines.push(`Capture cadence: ${CONFIG.captureEveryNTurns > 0 ? `every ${CONFIG.captureEveryNTurns} turn${CONFIG.captureEveryNTurns === 1 ? "" : "s"} + session end` : "session end only"}`);
+  lines.push("Memory scope: one project container with metadata scopes");
+  lines.push(`Auto-recall: ${CONFIG.recallMode === "direct" ? "on" : CONFIG.recallMode}`);
+  lines.push(`Auto-capture: ${CONFIG.captureEveryNTurns > 0 ? `every ${CONFIG.captureEveryNTurns} completed turn${CONFIG.captureEveryNTurns === 1 ? "" : "s"}` : "at session end"}`);
   lines.push(`Project container: ${tags.canonical}`);
-  lines.push(`Personal reads: ${tags.personalReads.join(", ")}`);
-  lines.push(`Project reads: ${tags.projectReads.join(", ")}`);
+  lines.push(`Reads (including legacy): ${tags.allReads.join(", ")}`);
+  lines.push("MCP registration: enabled by the plugin");
 
   if (!isConfigured()) {
     lines.push("");
-    lines.push("Run /supermemory-login to connect, or set SUPERMEMORY_API_KEY.");
+    lines.push("Run `bunx opencode-supermemory@latest login` to connect, then restart OpenCode.");
     console.log(lines.join("\n"));
     return 0;
   }
 
-  const client = new SupermemoryClient();
-  const [profileResult, accountInfo] = await Promise.all([
-    client.getProfileScoped(
-      tags.canonical,
-      tags.personalReads,
-      "personal",
-    ),
+  const [apiProbe, accountInfo] = await Promise.all([
+    probeApi(apiUrl, tags.canonical),
     getAccountInfo(apiUrl),
   ]);
 
-  lines[2] = profileResult.success ? "Connected: yes" : "Connected: no";
+  lines[3] = `Connected: ${apiProbe.connected ? "yes" : "no"}`;
+  lines.push(`API reachability: ${apiProbe.status ?? "unavailable"} — ${apiProbe.detail}`);
 
   if (accountInfo.email || accountInfo.name || accountInfo.userId || accountInfo.orgName) {
     lines.push("");
@@ -642,11 +538,12 @@ async function status(): Promise<number> {
     lines.push("Account: authenticated API key (account details unavailable from API key)");
   }
 
-  if (!profileResult.success) {
-    lines.push("");
-    lines.push(`Connection check failed: ${profileResult.error}`);
+  if (!apiProbe.connected) {
     const devTlsHint = getDevTlsHint(apiUrl);
-    if (devTlsHint) lines.push(devTlsHint);
+    if (devTlsHint) {
+      lines.push("");
+      lines.push(devTlsHint);
+    }
   }
 
   console.log(lines.join("\n"));
