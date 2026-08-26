@@ -5,12 +5,22 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./tui": {
+      "types": "./dist/tui.d.ts",
+      "import": "./dist/tui.js"
+    }
+  },
   "bin": {
     "opencode-supermemory": "./dist/cli.js"
   },
   "scripts": {
     "generate:version": "node scripts/sync-version.mjs",
-    "build": "node scripts/sync-version.mjs && bun build ./src/index.ts --outdir ./dist --target node && bun build ./src/cli.ts --outfile ./dist/cli.js --target node && tsc --emitDeclarationOnly",
+    "build": "node scripts/sync-version.mjs && bun build ./src/index.ts --outdir ./dist --target node && bun build ./src/tui.tsx --outfile ./dist/tui.js --target bun --external @opentui/core --external @opentui/keymap --external @opentui/solid --external solid-js && bun build ./src/cli.ts --outfile ./dist/cli.js --target node && tsc --emitDeclarationOnly",
     "dev": "tsc --watch",
     "typecheck": "node scripts/sync-version.mjs && tsc --noEmit",
     "test": "node scripts/sync-version.mjs && bun test"
@@ -30,16 +40,28 @@
     "url": "https://github.com/supermemoryai/opencode-supermemory"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "^1.0.162",
+    "@opencode-ai/plugin": "^1.18.20",
+    "@opentui/core": "^0.5.8",
+    "@opentui/keymap": "^0.5.8",
+    "@opentui/solid": "^0.5.8",
     "@types/bun": "latest",
+    "solid-js": "1.9.12",
     "supermemory": "^4.0.0",
     "typescript": "^5.7.3"
+  },
+  "peerDependencies": {
+    "@opentui/core": ">=0.4.5",
+    "@opentui/keymap": ">=0.4.5",
+    "@opentui/solid": ">=0.4.5",
+    "solid-js": "1.9.12"
   },
   "opencode": {
     "type": "plugin",
     "hooks": [
       "chat.message",
       "permission.ask",
+      "tool.execute.before",
+      "tool.execute.after",
       "event"
     ]
   },
