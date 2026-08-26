@@ -24,6 +24,11 @@ Check the connection any time:
 bunx opencode-supermemory@latest status
 ```
 
+The installer also enables a persistent `◪ supermemory` footer in OpenCode's
+TUI. It turns blue while OpenCode is running a turn and keeps the latest recall
+or save activity visible. Native toasts show the same recall, save, failure, and
+update events as they happen.
+
 **Or let your agent do it** - paste this into OpenCode:
 
 ```

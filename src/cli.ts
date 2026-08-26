@@ -11,6 +11,7 @@ import { getTags } from "./services/tags.js";
 
 const OPENCODE_CONFIG_DIR = join(homedir(), ".config", "opencode");
 const OPENCODE_COMMAND_DIR = join(OPENCODE_CONFIG_DIR, "command");
+const OPENCODE_TUI_CONFIG = join(OPENCODE_CONFIG_DIR, "tui.jsonc");
 const OH_MY_OPENCODE_CONFIG = join(OPENCODE_CONFIG_DIR, "oh-my-opencode.json");
 const PLUGIN_NAME = "opencode-supermemory@latest";
 const DEFAULT_CONFIG_FILE = CONFIG_FILE ?? join(OPENCODE_CONFIG_DIR, "supermemory.json");
@@ -322,6 +323,26 @@ function createNewConfig(): boolean {
   return true;
 }
 
+function configureTuiPlugin(): boolean {
+  const candidates = [
+    join(OPENCODE_CONFIG_DIR, "tui.jsonc"),
+    join(OPENCODE_CONFIG_DIR, "tui.json"),
+  ];
+  const existing = candidates.find((path) => existsSync(path));
+  if (existing) return addPluginToConfig(existing);
+
+  mkdirSync(OPENCODE_CONFIG_DIR, { recursive: true });
+  writeFileSync(
+    OPENCODE_TUI_CONFIG,
+    `{
+  "plugin": ["${PLUGIN_NAME}"]
+}
+`,
+  );
+  console.log(`✓ Enabled persistent Supermemory footer in ${OPENCODE_TUI_CONFIG}`);
+  return true;
+}
+
 function createCommands(): boolean {
   mkdirSync(OPENCODE_COMMAND_DIR, { recursive: true });
 
@@ -432,6 +453,8 @@ async function install(options: InstallOptions): Promise<number> {
       createNewConfig();
     }
   }
+
+  configureTuiPlugin();
 
   // Step 2: Create commands
   console.log("\nStep 2: Create /supermemory-init, /supermemory-login, /supermemory-logout, and /supermemory-status commands");
