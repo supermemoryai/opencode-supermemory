@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   buildDirectRecallContext,
+  buildDirectRecallResult,
   MAX_RECALL_QUERY_CHARS,
   RecallSessionCache,
 } from "./recall.js";
@@ -114,5 +115,29 @@ describe("direct recall", () => {
     expect(context).toContain("This undisplayed profile fact may still be recalled");
     expect(context).toContain("Run typecheck before build");
     expect(context).toContain("◪");
+  });
+
+  test("reports visible recall counts and fail-open state", async () => {
+    const recalled = await buildDirectRecallResult({
+      prompt: "what did we decide about the build system",
+      sessionID: "session-visible",
+      cache: new RecallSessionCache(),
+      search: async () => ({
+        success: true,
+        results: [{ memory: "Use Bun", similarity: 0.9 }],
+      }),
+    });
+    expect(recalled.status).toBe("recalled");
+    expect(recalled.count).toBe(1);
+    expect(recalled.tokens).toBeGreaterThan(0);
+
+    const unavailable = await buildDirectRecallResult({
+      prompt: "what did we decide about the build system",
+      sessionID: "session-unavailable",
+      cache: new RecallSessionCache(),
+      search: async () => ({ success: false, error: "offline" }),
+    });
+    expect(unavailable.status).toBe("unavailable");
+    expect(unavailable.context).toBe("");
   });
 });
