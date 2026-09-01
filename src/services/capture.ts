@@ -254,7 +254,7 @@ export function createCaptureHook(
       {
         project: tags.projectName,
         sm_project_id: tags.projectId,
-        sm_scope: "personal",
+        agent_scope: "personal",
         sm_capture_mode: "automatic",
         captureReason: reason,
         sessionId: sessionID,

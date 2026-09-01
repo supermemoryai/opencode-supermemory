@@ -81,12 +81,10 @@ export interface ListResponse {
 
 function getScopeFilters(scope: MemoryScope) {
   return {
-    AND: [{ key: "sm_scope", value: scope, filterType: "metadata" as const }],
+    AND: [
+      { key: "agent_scope", value: scope, filterType: "metadata" as const },
+    ],
   };
-}
-
-function supportsScopedCanonicalTag(containerTag: string): boolean {
-  return /^repo_.+__[0-9a-f]{16}$/i.test(containerTag);
 }
 
 function isNotFoundError(error: unknown): boolean {
@@ -234,11 +232,7 @@ export class SupermemoryClient {
       ),
     ];
     const responses = await Promise.all([
-      this.searchMemories(
-        query,
-        canonicalTag,
-        supportsScopedCanonicalTag(canonicalTag) ? scope : undefined,
-      ),
+      this.searchMemories(query, canonicalTag, scope),
       ...legacyTags.map((containerTag) =>
         this.searchMemories(query, containerTag),
       ),
@@ -325,11 +319,7 @@ export class SupermemoryClient {
       ),
     ];
     const responses = await Promise.all([
-      this.getProfile(
-        canonicalTag,
-        query,
-        supportsScopedCanonicalTag(canonicalTag) ? scope : undefined,
-      ),
+      this.getProfile(canonicalTag, query, scope),
       ...legacyTags.map((containerTag) =>
         this.getProfile(containerTag, query),
       ),
@@ -507,11 +497,7 @@ export class SupermemoryClient {
       ),
     ];
     const responses = await Promise.all([
-      this.listMemories(
-        canonicalTag,
-        limit,
-        supportsScopedCanonicalTag(canonicalTag) ? scope : undefined,
-      ),
+      this.listMemories(canonicalTag, limit, scope),
       ...legacyTags.map((containerTag) =>
         this.listMemories(containerTag, limit),
       ),

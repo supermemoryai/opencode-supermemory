@@ -220,15 +220,20 @@ The `supermemory` tool is available to the agent:
 **Types:** `project-config`, `architecture`, `error-solution`, `preference`, `learned-pattern`, `conversation`
 
 OpenCode sends the same shared coding-agent entity context as Claude Code and
-Codex. Personal and project memories are distinguished with `sm_scope`
+Codex. Personal and project memories are distinguished with `agent_scope`
 metadata inside the shared repository container.
+
+> **Release dependency:** Release this plugin version only after the backend
+> `sm_scope` to `agent_scope` backfill has deployed and completed. Canonical
+> container reads filter only on `agent_scope`; legacy containers intentionally
+> remain unfiltered for backward compatibility.
 
 ## Memory Scoping
 
 | Scope   | Tag                                         | Metadata                |
 | ------- | ------------------------------------------- | ----------------------- |
-| User    | `repo_{project-name}__{repository-hash}`    | `sm_scope: "personal"`  |
-| Project | `repo_{project-name}__{repository-hash}`    | `sm_scope: "project"`   |
+| User    | `repo_{project-name}__{repository-hash}`    | `agent_scope: "personal"`  |
+| Project | `repo_{project-name}__{repository-hash}`    | `agent_scope: "project"`   |
 
 The repository hash comes from the normalized Git `origin` remote, so Claude
 Code, Codex, and OpenCode use the same container for the same repository.

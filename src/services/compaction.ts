@@ -57,6 +57,20 @@ export interface CompactionOptions {
   getModelLimit?: (providerID: string, modelID: string) => number | undefined;
 }
 
+export function createCompactionMemoryMetadata(
+  tags: Pick<ResolvedTags, "projectName" | "projectId">,
+  sessionID: string,
+) {
+  return {
+    type: "conversation" as const,
+    project: tags.projectName,
+    sm_project_id: tags.projectId,
+    agent_scope: "personal" as const,
+    sm_capture_mode: "compaction",
+    sessionId: sessionID,
+  };
+}
+
 function createCompactionPrompt(projectMemories: string[]): string {
   const memoriesSection = projectMemories.length > 0 
     ? `
@@ -308,14 +322,7 @@ export function createCompactionHook(
       const result = await supermemoryClient.addMemory(
         `[Session Summary]\n${summaryContent}`,
         tags.canonical,
-        {
-          type: "conversation",
-          project: tags.projectName,
-          sm_project_id: tags.projectId,
-          sm_scope: "personal",
-          sm_capture_mode: "compaction",
-          sessionId: sessionID,
-        },
+        createCompactionMemoryMetadata(tags, sessionID),
         { entityContext: AGENT_ENTITY_CONTEXT }
       );
 

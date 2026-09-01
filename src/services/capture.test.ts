@@ -183,6 +183,8 @@ describe("automatic conversation capture", () => {
 
     expect(writes).toHaveLength(1);
     expect(writes[0]?.metadata?.captureReason).toBe("cadence");
+    expect(writes[0]?.metadata?.agent_scope).toBe("personal");
+    expect(writes[0]?.metadata?.sm_scope).toBeUndefined();
 
     messages = conversation(4);
     await hook.event({
