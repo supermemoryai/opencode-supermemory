@@ -11,7 +11,6 @@ import { getTags } from "./services/tags.js";
 
 const OPENCODE_CONFIG_DIR = join(homedir(), ".config", "opencode");
 const OPENCODE_COMMAND_DIR = join(OPENCODE_CONFIG_DIR, "command");
-const OH_MY_OPENCODE_CONFIG = join(OPENCODE_CONFIG_DIR, "oh-my-opencode.json");
 const PLUGIN_NAME = "opencode-supermemory@latest";
 const DEFAULT_CONFIG_FILE = CONFIG_FILE ?? join(OPENCODE_CONFIG_DIR, "supermemory.json");
 
@@ -344,58 +343,8 @@ function createCommands(): boolean {
   return true;
 }
 
-function isOhMyOpencodeInstalled(): boolean {
-  const configPath = findOpencodeConfig();
-  if (!configPath) return false;
-  
-  try {
-    const content = readFileSync(configPath, "utf-8");
-    return content.includes("oh-my-opencode");
-  } catch {
-    return false;
-  }
-}
-
-function isAutoCompactAlreadyDisabled(): boolean {
-  if (!existsSync(OH_MY_OPENCODE_CONFIG)) return false;
-  
-  try {
-    const content = readFileSync(OH_MY_OPENCODE_CONFIG, "utf-8");
-    const config = JSON.parse(content);
-    const disabledHooks = config.disabled_hooks as string[] | undefined;
-    return disabledHooks?.includes("anthropic-context-window-limit-recovery") ?? false;
-  } catch {
-    return false;
-  }
-}
-
-function disableAutoCompactHook(): boolean {
-  try {
-    let config: Record<string, unknown> = {};
-    
-    if (existsSync(OH_MY_OPENCODE_CONFIG)) {
-      const content = readFileSync(OH_MY_OPENCODE_CONFIG, "utf-8");
-      config = JSON.parse(content);
-    }
-    
-    const disabledHooks = (config.disabled_hooks as string[]) || [];
-    if (!disabledHooks.includes("anthropic-context-window-limit-recovery")) {
-      disabledHooks.push("anthropic-context-window-limit-recovery");
-    }
-    config.disabled_hooks = disabledHooks;
-    
-    writeFileSync(OH_MY_OPENCODE_CONFIG, JSON.stringify(config, null, 2));
-    console.log(`✓ Disabled anthropic-context-window-limit-recovery hook in oh-my-opencode.json`);
-    return true;
-  } catch (err) {
-    console.error("✗ Failed to update oh-my-opencode.json:", err);
-    return false;
-  }
-}
-
 interface InstallOptions {
   tui: boolean;
-  disableAutoCompact: boolean;
 }
 
 async function install(options: InstallOptions): Promise<number> {
@@ -446,33 +395,9 @@ async function install(options: InstallOptions): Promise<number> {
     createCommands();
   }
 
-  // Step 3: Configure Oh My OpenCode (if installed)
-  if (isOhMyOpencodeInstalled()) {
-    console.log("\nStep 3: Configure Oh My OpenCode");
-    console.log("Detected Oh My OpenCode plugin.");
-    console.log("Supermemory handles context compaction, so the built-in context-window-limit-recovery hook should be disabled.");
-    
-    if (isAutoCompactAlreadyDisabled()) {
-      console.log("✓ anthropic-context-window-limit-recovery hook already disabled");
-    } else {
-      if (options.tui) {
-        const shouldDisable = await confirm(rl!, "Disable anthropic-context-window-limit-recovery hook to let Supermemory handle context?");
-        if (!shouldDisable) {
-          console.log("Skipped.");
-        } else {
-          disableAutoCompactHook();
-        }
-      } else if (options.disableAutoCompact) {
-        disableAutoCompactHook();
-      } else {
-        console.log("Skipped. Use --disable-context-recovery to disable the hook in non-interactive mode.");
-      }
-    }
-  }
-
   if (rl) rl.close();
 
-  // Step 4: Authenticate
+  // Final step: Authenticate
   console.log("\n" + "─".repeat(50));
   console.log("\n🔑 Final step: Authenticate with Supermemory\n");
 
@@ -654,7 +579,6 @@ opencode-supermemory - Persistent memory for OpenCode agents
 Commands:
   install    Install and configure the plugin
     --no-tui                     Non-interactive mode (for LLM agents)
-    --disable-context-recovery   Disable Oh My OpenCode's context hook
   login      Authenticate with Supermemory (opens browser)
   logout     Clear stored credentials
   status     Show Supermemory connection status
@@ -676,13 +600,11 @@ if (args.length === 0 || args[0] === "help" || args[0] === "--help" || args[0] =
 
 if (args[0] === "install") {
   const noTui = args.includes("--no-tui");
-  const disableAutoCompact = args.includes("--disable-context-recovery");
-  install({ tui: !noTui, disableAutoCompact }).then((code) => process.exit(code));
+  install({ tui: !noTui }).then((code) => process.exit(code));
 } else if (args[0] === "setup") {
   console.log("Note: 'setup' is deprecated. Use 'install' instead.\n");
   const noTui = args.includes("--no-tui");
-  const disableAutoCompact = args.includes("--disable-context-recovery");
-  install({ tui: !noTui, disableAutoCompact }).then((code) => process.exit(code));
+  install({ tui: !noTui }).then((code) => process.exit(code));
 } else if (args[0] === "login") {
   login().then((code) => process.exit(code));
 } else if (args[0] === "logout") {
