@@ -46,7 +46,7 @@ bunx opencode-supermemory@latest install --no-tui
 This will:
 
 - Register the plugin in `~/.config/opencode/opencode.jsonc`
-- Create the `/supermemory-init` command
+- Create the `/supermemory-index` command (`/supermemory-init` is an alias)
 
 #### Step 2: Verify the config
 
@@ -115,7 +115,7 @@ If it is not connected, check:
 
 #### Step 5: Initialize codebase memory (optional)
 
-Run `/supermemory-init` to have the agent explore and memorize the codebase.
+Run `/supermemory-index` to have the agent explore and memorize the codebase. `/supermemory-init` is an alias.
 
 </details>
 
@@ -183,7 +183,7 @@ Add custom triggers via `keywordPatterns` config.
 
 ### Codebase Indexing
 
-Run `/supermemory-init` to explore and memorize your codebase structure, patterns, and conventions.
+Run `/supermemory-index` to explore and memorize your codebase structure, patterns, and conventions. `/supermemory-init` is an alias.
 
 ### Preemptive Compaction
 
