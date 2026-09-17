@@ -10,7 +10,10 @@ import { SupermemoryClient } from "./services/client.js";
 import { getTags } from "./services/tags.js";
 
 const OPENCODE_CONFIG_DIR = join(homedir(), ".config", "opencode");
-const OPENCODE_COMMAND_DIR = join(OPENCODE_CONFIG_DIR, "command");
+const OPENCODE_COMMAND_DIRS = [
+  join(OPENCODE_CONFIG_DIR, "commands"),
+  join(OPENCODE_CONFIG_DIR, "command"),
+];
 const OH_MY_OPENCODE_CONFIG = join(OPENCODE_CONFIG_DIR, "oh-my-opencode.json");
 const PLUGIN_NAME = "opencode-supermemory@latest";
 const DEFAULT_CONFIG_FILE = CONFIG_FILE ?? join(OPENCODE_CONFIG_DIR, "supermemory.json");
@@ -339,26 +342,25 @@ function createNewConfig(): boolean {
 }
 
 function createCommands(): boolean {
-  mkdirSync(OPENCODE_COMMAND_DIR, { recursive: true });
+  const files = [
+    ["supermemory-index.md", SUPERMEMORY_INDEX_COMMAND],
+    ["supermemory-init.md", SUPERMEMORY_INDEX_COMMAND],
+    ["supermemory-login.md", SUPERMEMORY_LOGIN_COMMAND],
+    ["supermemory-logout.md", SUPERMEMORY_LOGOUT_COMMAND],
+    ["supermemory-status.md", SUPERMEMORY_STATUS_COMMAND],
+  ];
 
-  const indexPath = join(OPENCODE_COMMAND_DIR, "supermemory-index.md");
-  writeFileSync(indexPath, SUPERMEMORY_INDEX_COMMAND);
+  for (const dir of OPENCODE_COMMAND_DIRS) {
+    mkdirSync(dir, { recursive: true });
+    for (const [name, body] of files) {
+      writeFileSync(join(dir, name), body);
+    }
+  }
+
   console.log(`✓ Created /supermemory-index command`);
-
-  const initPath = join(OPENCODE_COMMAND_DIR, "supermemory-init.md");
-  writeFileSync(initPath, SUPERMEMORY_INDEX_COMMAND);
   console.log(`✓ Created /supermemory-init command`);
-
-  const loginPath = join(OPENCODE_COMMAND_DIR, "supermemory-login.md");
-  writeFileSync(loginPath, SUPERMEMORY_LOGIN_COMMAND);
   console.log(`✓ Created /supermemory-login command`);
-
-  const logoutPath = join(OPENCODE_COMMAND_DIR, "supermemory-logout.md");
-  writeFileSync(logoutPath, SUPERMEMORY_LOGOUT_COMMAND);
   console.log(`✓ Created /supermemory-logout command`);
-
-  const statusPath = join(OPENCODE_COMMAND_DIR, "supermemory-status.md");
-  writeFileSync(statusPath, SUPERMEMORY_STATUS_COMMAND);
   console.log(`✓ Created /supermemory-status command`);
 
   return true;
