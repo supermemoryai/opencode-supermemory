@@ -203,7 +203,7 @@ context. On OpenCode V1 they are TUI toasts; on OpenCode 2 they are rendered by 
 server plugin.
 
 The same TUI plugin keeps a persistent `◪ supermemory` footer. It turns blue while a
-session is running and otherwise shows the latest recall or save activity. On OpenCode V1
+session is running and otherwise shows the latest recall or save activity, if any. On OpenCode V1
 the installer enables it through `~/.config/opencode/tui.jsonc`; on OpenCode 2 it appears
 in the prompt footer without extra configuration.
 

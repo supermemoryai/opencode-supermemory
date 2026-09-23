@@ -33,5 +33,6 @@ describe("status footer helpers", () => {
     expect(activityLabel("other")).toBe("other");
     expect(statusText(true, "saved this turn")).toBe(`${STATUS_PREFIX}running`);
     expect(statusText(false, "saved this turn")).toBe(`${STATUS_PREFIX}saved this turn`);
+    expect(statusText(false, "")).toBe("◪ supermemory");
   });
 });

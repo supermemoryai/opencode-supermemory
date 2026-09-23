@@ -3,7 +3,9 @@
  * V1 and OpenCode 2 TUI plugins. Kept free of JSX so they can be unit tested.
  */
 export const STATUS_PREFIX = "◪ supermemory · ";
-export const DEFAULT_STATUS_ACTIVITY = "ready";
+export const STATUS_LABEL = "◪ supermemory";
+/** Idle with no activity yet shows just the label, without a suffix. */
+export const DEFAULT_STATUS_ACTIVITY = "";
 
 export interface RecallActivity {
   count: number;
@@ -53,5 +55,6 @@ export function activityLabel(message: string): string {
 }
 
 export function statusText(running: boolean, activity: string): string {
-  return `${STATUS_PREFIX}${running ? "running" : activity}`;
+  if (running) return `${STATUS_PREFIX}running`;
+  return activity ? `${STATUS_PREFIX}${activity}` : STATUS_LABEL;
 }
