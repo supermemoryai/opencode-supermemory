@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { Part } from "@opencode-ai/sdk";
 
 import {
+  AUTOMATIC_CAPTURE_TIMEOUT_MS,
   buildCadenceBatches,
   buildCaptureTurns,
   buildSessionEndBatch,
@@ -9,6 +10,7 @@ import {
   getCaptureId,
   type SessionMessage,
 } from "./capture.js";
+import { SupermemoryClient } from "./client.js";
 import type { ResolvedTags } from "./tags.js";
 
 function textPart(
@@ -122,6 +124,7 @@ describe("automatic conversation capture", () => {
       conversationId: string;
       metadata?: Record<string, string | number | boolean>;
       customId?: string;
+      timeoutMs?: number;
     }> = [];
     const ctx = {
       directory: "/repo",
@@ -155,6 +158,7 @@ describe("automatic conversation capture", () => {
             conversationId,
             metadata,
             customId: options?.customId,
+            timeoutMs: options?.timeoutMs,
           });
           return { success: true };
         },
@@ -183,6 +187,7 @@ describe("automatic conversation capture", () => {
 
     expect(writes).toHaveLength(1);
     expect(writes[0]?.metadata?.captureReason).toBe("cadence");
+    expect(writes[0]?.timeoutMs).toBe(AUTOMATIC_CAPTURE_TIMEOUT_MS);
 
     messages = conversation(4);
     await hook.event({
@@ -207,5 +212,76 @@ describe("automatic conversation capture", () => {
     expect(writes).toHaveLength(2);
     expect(writes[1]?.metadata?.captureReason).toBe("session_end");
     expect(writes[0]?.customId).not.toBe(writes[1]?.customId);
+  });
+
+  test("retains terminal capture state after failure and retries with bounded SDK options", async () => {
+    const sdkOptions: Array<{ timeout?: number; maxRetries?: number }> = [];
+    let attempts = 0;
+    let readAttempts = 0;
+    const memoryClient = new SupermemoryClient();
+    (
+      memoryClient as unknown as {
+        client: {
+          memories: {
+            add: (
+              payload: unknown,
+              options?: { timeout?: number; maxRetries?: number },
+            ) => Promise<{ id: string }>;
+          };
+        };
+      }
+    ).client = {
+      memories: {
+        add: async (_payload, options) => {
+          sdkOptions.push(options ?? {});
+          attempts += 1;
+          if (attempts === 1) throw new Error("temporary capture failure");
+          return { id: "memory-1" };
+        },
+      },
+    };
+
+    const hook = createCaptureHook(
+      {
+        directory: "/repo",
+        client: {
+          session: {
+            messages: async () => {
+              readAttempts += 1;
+              if (readAttempts === 1) {
+                throw new Error("temporary transcript read failure");
+              }
+              return { data: conversation(1) };
+            },
+          },
+        },
+      },
+      {
+        canonical: "repo_test__0123456789abcdef",
+        user: "repo_test__0123456789abcdef",
+        project: "repo_test__0123456789abcdef",
+        projectId: "0123456789abcdef",
+        projectName: "test",
+        personalReads: [],
+        projectReads: [],
+        allReads: [],
+      },
+      { captureEveryNTurns: 0, memoryClient },
+    );
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      await hook.event({
+        event: {
+          type: "session.deleted",
+          properties: { info: { id: "session-1" } },
+        },
+      });
+    }
+
+    expect(sdkOptions).toEqual([
+      { timeout: AUTOMATIC_CAPTURE_TIMEOUT_MS, maxRetries: 0 },
+      { timeout: AUTOMATIC_CAPTURE_TIMEOUT_MS, maxRetries: 0 },
+    ]);
+    expect(readAttempts).toBe(3);
   });
 });

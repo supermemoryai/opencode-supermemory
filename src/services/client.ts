@@ -20,6 +20,7 @@ import type {
 
 const TIMEOUT_MS = 30000;
 const TIMEOUT_BACKSTOP_GRACE_MS = 250;
+const SETTINGS_UPDATE_TIMEOUT_MS = 3_000;
 const MAX_CONVERSATION_CHARS = 100_000;
 const OPENCODE_SOURCE = "opencode";
 
@@ -165,10 +166,25 @@ export class SupermemoryClient {
         baseURL: getApiBaseUrl(),
         defaultHeaders: { "x-sm-source": OPENCODE_SOURCE },
       });
-      void this.client.settings.update({
-        shouldLLMFilter: true,
-        filterPrompt: CONFIG.filterPrompt,
-      });
+      try {
+        void this.client.settings
+          .update(
+            {
+              shouldLLMFilter: true,
+              filterPrompt: CONFIG.filterPrompt,
+            },
+            { timeout: SETTINGS_UPDATE_TIMEOUT_MS, maxRetries: 0 },
+          )
+          .catch((error) => {
+            log("settings.update: best-effort update failed", {
+              error: error instanceof Error ? error.message : String(error),
+            });
+          });
+      } catch (error) {
+        log("settings.update: best-effort update failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
     return this.client;
   }
@@ -396,7 +412,11 @@ export class SupermemoryClient {
       tool?: string;
       [key: string]: unknown;
     },
-    options?: { customId?: string; entityContext?: string },
+    options?: {
+      customId?: string;
+      entityContext?: string;
+      timeoutMs?: number;
+    },
   ) {
     log("addMemory: start", {
       containerTag,
@@ -405,6 +425,7 @@ export class SupermemoryClient {
       hasEntityContext: !!options?.entityContext,
     });
     try {
+      const requestTimeout = options?.timeoutMs;
       const mergedMetadata = Object.fromEntries(
         Object.entries({
           sm_source: OPENCODE_SOURCE,
@@ -434,8 +455,15 @@ export class SupermemoryClient {
       }
 
       const result = await withTimeout(
-        this.getClient().memories.add(payload),
-        TIMEOUT_MS,
+        this.getClient().memories.add(
+          payload,
+          requestTimeout
+            ? { timeout: requestTimeout, maxRetries: 0 }
+            : undefined,
+        ),
+        requestTimeout
+          ? requestTimeout + TIMEOUT_BACKSTOP_GRACE_MS
+          : TIMEOUT_MS,
       );
       log("addMemory: success", { id: result.id });
       return { success: true as const, ...result };
@@ -579,6 +607,7 @@ export class SupermemoryClient {
       defaultEntityContext?: string;
       entityContextByContainerTag?: Record<string, string>;
       customId?: string;
+      timeoutMs?: number;
     },
   ) {
     log("ingestConversation: start", {
@@ -630,6 +659,7 @@ export class SupermemoryClient {
       const result = await this.addMemory(content, tag, ingestMetadata, {
         ...(entityContext ? { entityContext } : {}),
         ...(customId ? { customId } : {}),
+        ...(options?.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
       });
       if (result.success) {
         savedIds.push(result.id);

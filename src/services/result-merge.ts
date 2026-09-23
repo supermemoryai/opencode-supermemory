@@ -28,7 +28,12 @@ function searchKey(result: SearchResultItem): string {
 }
 
 function score(result: SearchResultItem): number {
-  return result.similarity ?? result.score ?? -1;
+  return (
+    [result.similarity, result.score].find(
+      (value): value is number =>
+        typeof value === "number" && Number.isFinite(value),
+    ) ?? -1
+  );
 }
 
 export function mergeSearchResponses(
