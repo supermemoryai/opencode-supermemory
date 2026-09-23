@@ -1,6 +1,7 @@
 import type { PluginInput } from "@opencode-ai/plugin";
 
 import { log } from "./logger.js";
+import { getUserFriendlyError } from "./error-helpers.js";
 import type { UpdateInfo } from "./version-check.js";
 
 type ToastVariant = "info" | "success" | "warning" | "error";
@@ -14,7 +15,7 @@ interface ToastClient {
 export interface MemoryActivityReporter {
   recalling(query?: string): void;
   recalled(count: number, tokens: number): void;
-  recallUnavailable(): void;
+  recallUnavailable(error?: string): void;
   saved(): void;
   updateAvailable(info: UpdateInfo): void;
 }
@@ -55,9 +56,9 @@ export function createMemoryActivityReporter(
         3_000,
       );
     },
-    recallUnavailable() {
+    recallUnavailable(error) {
       show(
-        "recall unavailable; continuing without recalled context",
+        `recall failed: ${getUserFriendlyError(error).slice(0, 100)}`,
         "warning",
         3_000,
       );

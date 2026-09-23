@@ -139,5 +139,17 @@ describe("direct recall", () => {
     });
     expect(unavailable.status).toBe("unavailable");
     expect(unavailable.context).toBe("");
+    expect(unavailable.error).toBe("offline");
+
+    const thrown = await buildDirectRecallResult({
+      prompt: "what did we decide about the build system",
+      sessionID: "session-thrown",
+      cache: new RecallSessionCache(),
+      search: async () => {
+        throw new Error("network failed");
+      },
+    });
+    expect(thrown.status).toBe("unavailable");
+    expect(thrown.error).toBe("network failed");
   });
 });

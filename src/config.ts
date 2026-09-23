@@ -132,13 +132,13 @@ function loadRawConfig(): { config: SupermemoryConfig; existed: boolean } {
 
 const { config: fileConfig, existed: configExisted } = loadRawConfig();
 
-function getApiKey(): string | undefined {
+export function getApiKeyValue(): string | undefined {
   if (process.env.SUPERMEMORY_API_KEY) return process.env.SUPERMEMORY_API_KEY;
   if (fileConfig.apiKey) return fileConfig.apiKey;
   return loadCredentials()?.apiKey;
 }
 
-export const SUPERMEMORY_API_KEY = getApiKey();
+export const SUPERMEMORY_API_KEY = getApiKeyValue();
 
 function normalizeBaseUrl(baseUrl: unknown): string | null {
   if (typeof baseUrl !== "string" || !baseUrl.trim()) return null;

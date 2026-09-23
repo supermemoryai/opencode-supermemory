@@ -20,7 +20,7 @@
   },
   "scripts": {
     "generate:version": "node scripts/sync-version.mjs",
-    "build": "node scripts/sync-version.mjs && bun build ./src/index.ts --outdir ./dist --target node && bun build ./src/tui.tsx --outfile ./dist/tui.js --target bun --external @opentui/core --external @opentui/keymap --external @opentui/solid --external solid-js && bun build ./src/cli.ts --outfile ./dist/cli.js --target node && tsc --emitDeclarationOnly",
+    "build": "node scripts/sync-version.mjs && bun build ./src/index.ts --outdir ./dist --target node && bun build ./src/tui.tsx --outfile ./dist/tui.js --target bun --external @opentui/core --external @opentui/keymap --external @opentui/solid --external solid-js && bun build ./src/cli.ts --outfile ./dist/cli.js --target node && bun build ./src/mcp-proxy.ts --outfile ./dist/mcp-proxy.js --target node && tsc --emitDeclarationOnly",
     "dev": "tsc --watch",
     "typecheck": "node scripts/sync-version.mjs && tsc --noEmit",
     "test": "node scripts/sync-version.mjs && bun test"
@@ -59,6 +59,7 @@
     "type": "plugin",
     "hooks": [
       "chat.message",
+      "config",
       "permission.ask",
       "tool.execute.before",
       "tool.execute.after",

@@ -25,9 +25,7 @@ bunx opencode-supermemory@latest status
 ```
 
 The installer also enables a persistent `◪ supermemory` footer in OpenCode's
-TUI. It turns blue while OpenCode is running a turn and keeps the latest recall
-or save activity visible. Native toasts show the same recall, save, failure, and
-update events as they happen.
+TUI. Native toasts show recall, save, failure, and update events as they happen.
 
 **Or let your agent do it** - paste this into OpenCode:
 
@@ -51,7 +49,9 @@ bunx opencode-supermemory@latest install --no-tui
 This will:
 
 - Register the plugin in `~/.config/opencode/opencode.jsonc`
-- Create the `/supermemory-init` command
+- Create `/supermemory-login` and `/supermemory-status`
+- Remove legacy `/supermemory-init`, `/supermemory-logout`, and
+  `/supermemory-switch-organization` commands
 
 #### Step 2: Verify the config
 
@@ -118,10 +118,6 @@ If it is not connected, check:
 2. Is the plugin in `opencode.jsonc`?
 3. Check logs: `tail ~/.opencode-supermemory.log`
 
-#### Step 5: Initialize codebase memory (optional)
-
-Run `/supermemory-init` to have the agent explore and memorize the codebase.
-
 </details>
 
 ## Features
@@ -186,9 +182,11 @@ Agent: [saves to project memory]
 
 Add custom triggers via `keywordPatterns` config.
 
-### Codebase Indexing
+### Hosted MCP Tools
 
-Run `/supermemory-init` to explore and memorize your codebase structure, patterns, and conventions.
+Agent-facing search, add, list, profile, graph, and forget operations come from
+the hosted Supermemory MCP server. Read-only recall tools are approved
+automatically; memory writes still follow OpenCode's normal permission flow.
 
 ### Preemptive Compaction
 
@@ -210,19 +208,9 @@ Content in `<private>` tags is never stored.
 
 ## Tool Usage
 
-The `supermemory` tool is available to the agent:
-
-| Mode      | Args                         | Description       |
-| --------- | ---------------------------- | ----------------- |
-| `add`     | `content`, `type?`, `scope?` | Store memory      |
-| `search`  | `query`, `scope?`            | Search memories   |
-| `profile` | `query?`                     | View user profile |
-| `list`    | `scope?`, `limit?`           | List memories     |
-| `forget`  | `memoryId`, `scope?`         | Delete memory     |
-
-**Scopes:** `user` (personal memories for the current project), `project` (default)
-
-**Types:** `project-config`, `architecture`, `error-solution`, `preference`, `learned-pattern`, `conversation`
+Hosted MCP tools are registered with the `supermemory_` prefix, including
+`supermemory_search_memory`, `supermemory_add_memory`, and
+`supermemory_whoAmI`.
 
 OpenCode sends the same shared coding-agent entity context as Claude Code and
 Codex. Personal and project memories are distinguished with `sm_scope`

@@ -128,6 +128,7 @@ export interface DirectRecallResult {
   status: "skipped" | "empty" | "recalled" | "unavailable";
   count: number;
   tokens: number;
+  error?: string;
 }
 
 export async function buildDirectRecallResult(options: {
@@ -144,7 +145,10 @@ export async function buildDirectRecallResult(options: {
     const searchPromise = query
       ? Promise.resolve()
           .then(() => options.search(query))
-          .catch(() => null)
+          .catch((error) => ({
+            success: false as const,
+            error: error instanceof Error ? error.message : String(error),
+          }))
       : null;
 
     if (options.suppressTexts) {
@@ -159,7 +163,13 @@ export async function buildDirectRecallResult(options: {
 
     const response = await searchPromise;
     if (!response?.success) {
-      return { context: "", status: "unavailable", count: 0, tokens: 0 };
+      return {
+        context: "",
+        status: "unavailable",
+        count: 0,
+        tokens: 0,
+        error: response?.error,
+      };
     }
     const hits = normalizeRecallResults(response.results ?? []);
     const freshHits = options.cache.takeFresh(options.sessionID, hits);
@@ -174,8 +184,14 @@ export async function buildDirectRecallResult(options: {
       count: freshHits.length,
       tokens: Math.round(context.length / 4),
     };
-  } catch {
-    return { context: "", status: "unavailable", count: 0, tokens: 0 };
+  } catch (error) {
+    return {
+      context: "",
+      status: "unavailable",
+      count: 0,
+      tokens: 0,
+      error: error instanceof Error ? error.message : String(error),
+    };
   }
 }
 
