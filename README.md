@@ -13,9 +13,13 @@
 OpenCode plugin for persistent memory using [Supermemory](https://supermemory.ai). Your
 agent remembers what you tell it, across sessions and across projects.
 
+One package supports both OpenCode generations: OpenCode V1 loads the root entry from
+the `plugin` array, and OpenCode 2 loads `opencode-supermemory/server` (plus a small TUI
+companion for notices) from the `plugins` array. See [OpenCode 2](#opencode-2).
+
 <div align="center">
 
-[Installation](#installation) · [Features](#features) · [Tool usage](#tool-usage) · [Memory scoping](#memory-scoping) · [Configuration](#configuration) · [License](#license)
+[Installation](#installation) · [OpenCode 2](#opencode-2) · [Features](#features) · [Tool usage](#tool-usage) · [Memory scoping](#memory-scoping) · [Configuration](#configuration) · [License](#license)
 
 </div>
 
@@ -51,12 +55,14 @@ If you're an LLM agent helping set up opencode-supermemory, follow these steps:
 bunx opencode-supermemory@latest install --no-tui
 ```
 
-This registers the plugin in `~/.config/opencode/opencode.jsonc` and creates the
-`/supermemory-init` command. Add `--disable-context-recovery` if the user also has
+This registers the plugin in `~/.config/opencode/opencode.jsonc` for both OpenCode V1
+and OpenCode 2, and creates the `/supermemory-index` command. Add
+`--disable-context-recovery` if the user also has
 [Oh My OpenCode](#usage-with-oh-my-opencode) installed, to avoid its auto-compact hook
-fighting with this plugin's compaction.
+fighting with this plugin's V1 compaction.
 
-- Register the plugin in `~/.config/opencode/opencode.jsonc`
+- Register the plugin in `~/.config/opencode/opencode.jsonc` (`plugin` for V1, `plugins`
+  for OpenCode 2, plus an `allow` rule for the read-only `supermemory_recall` tool)
 - Create the `/supermemory-index` command (`/supermemory-init` is an alias)
 
 #### Step 2: Verify the config
@@ -65,13 +71,23 @@ fighting with this plugin's compaction.
 cat ~/.config/opencode/opencode.jsonc
 ```
 
-Should contain `"plugin": ["opencode-supermemory"]`. If not, add it manually:
+Should contain the entries below. The installer preserves comments and other settings and
+is safe to re-run; if anything is missing, add it manually:
 
 ```jsonc
 {
+  // OpenCode V1
   "plugin": [
-    "opencode-supermemory",
+    "opencode-supermemory@latest",
     // ... other plugins
+  ],
+  // OpenCode 2
+  "plugins": [
+    "opencode-supermemory",
+    // ... other OpenCode 2 plugins
+  ],
+  "permissions": [
+    { "action": "supermemory_recall", "resource": "*", "effect": "allow" },
   ],
 }
 ```
@@ -93,9 +109,11 @@ For headless environments, set `SUPERMEMORY_API_KEY` manually, or create
 
 **Step 4: Verify setup**
 
-Tell the user to restart OpenCode and run `bunx opencode-supermemory@latest status`. If
-it's not connected, check: the user is authenticated (or `SUPERMEMORY_API_KEY` is set),
-the plugin is in `opencode.jsonc`, and `~/.opencode-supermemory.log` for errors.
+Tell the user to restart OpenCode and run `bunx opencode-supermemory@latest status`. The
+status output lists whether the V1 and OpenCode 2 entries are registered. If it's not
+connected, check: the user is authenticated (or `SUPERMEMORY_API_KEY` is set), the plugin
+is in `opencode.jsonc`, `opencode plugin list` shows `supermemory` on OpenCode 2, and
+`~/.opencode-supermemory.log` for errors.
 
 **Step 5: Initialize codebase memory (optional)**
 
@@ -109,7 +127,7 @@ Run `/supermemory-index` to have the agent explore and memorize the codebase. `/
 | --- | --- |
 | 🧠 **Context injection**<br>On a session's first message, the agent silently receives your profile, all project knowledge, and (if `autoRecallEveryPrompt` is on) a semantic search over personal memories. | 🔎 **Reasoned recall**<br>Every turn, the agent is shown a directive asking it to decide whether recalling memory would help before answering. It searches via the `supermemory` tool only when it decides to; the search itself is auto-approved. |
 | 💾 **Automatic capture**<br>Completed turns are saved every `captureEveryNTurns` turns, with any remainder flushed when the session ends or OpenCode shuts down. Synthetic plugin context is excluded and `<private>` content is redacted. | 🗣️ **Keyword detection**<br>Saying "remember", "save this", "don't forget", or a custom pattern nudges the agent to save to memory. |
-| 🧭 **Codebase indexing**<br>`/supermemory-init` has the agent explore and memorize the codebase's structure, patterns, and conventions. | 🗜️ **Preemptive compaction**<br>At 80% context capacity, triggers OpenCode's summarization, injects project memories into the summary, and saves the summary itself as a memory. |
+| 🧭 **Codebase indexing**<br>`/supermemory-init` has the agent explore and memorize the codebase's structure, patterns, and conventions. | 🗜️ **Compaction memory**<br>On OpenCode V1, triggers summarization at 80% context capacity. On OpenCode 2, enriches the native compaction request. Both inject project memories into the summary and save the summary itself as a memory. |
 | 🔒 **Privacy**<br>Content wrapped in `<private>...</private>` is never stored. | 🔔 **Update notices**<br>Checks npm for a newer release on session start and surfaces a one-line notice. |
 
 ```
@@ -166,12 +184,68 @@ Add custom triggers via `keywordPatterns` config.
 
 Run `/supermemory-index` to explore and memorize your codebase structure, patterns, and conventions. `/supermemory-init` is an alias.
 
-### Preemptive Compaction
+### Compaction Memory
 
-When context hits 80% capacity:
+On OpenCode V1, when context hits 80% capacity (`compactionThreshold`) the plugin triggers
+OpenCode's summarization, injects project memories into the summary prompt, and saves the
+resulting summary as a memory.
+
+On OpenCode 2, OpenCode owns the compaction trigger and model. The plugin hooks the native
+compaction request to add the same project memories, then saves each successful summary as
+a memory. Set `compactionEnabled: false` to opt out on OpenCode 2.
+
+### Activity Notices
+
+Supermemory shows a short native notice when it recalls memories, saves a turn, falls open
+because recall was unavailable, or a newer release exists. Notices never enter model
+context. On OpenCode V1 they are TUI toasts; on OpenCode 2 they are rendered by the
+`opencode-supermemory/tui` companion, which OpenCode loads automatically next to the
+server plugin.
 
 Set `SUPERMEMORY_DEBUG=1` to show a `[recall-decision]` line in each reply while testing
-recall.
+advisory recall.
+
+## OpenCode 2
+
+OpenCode 2 uses the plural `plugins` config key and the new `@opencode/plugin` API. The
+installer writes both generations, so one `opencode.jsonc` works for `opencode` (V1) and
+OpenCode 2 side by side:
+
+```jsonc
+{
+  "plugin": ["opencode-supermemory@latest"],
+  "plugins": ["opencode-supermemory"],
+  "permissions": [
+    { "action": "supermemory_recall", "resource": "*", "effect": "allow" },
+  ],
+}
+```
+
+OpenCode 2 resolves the package's `./server` export for the server plugin (id
+`supermemory`) and `./tui` for the notice companion (id `supermemory.tui`). Verify with
+`opencode plugin list` (or `v2 plugin registered` in `~/.opencode-supermemory.log`), and
+update with `opencode plugin update opencode-supermemory`.
+
+What is the same on both generations:
+
+- Direct recall on substantive prompts, advisory mode, and `recallMode: "off"`
+- First-message profile injection, keyword nudges, and automatic capture with the same
+  cadence, privacy redaction, and idempotent capture IDs
+- The `supermemory` tool with identical modes, scopes, and result formatting
+- Activity notices and update checks
+
+What differs on OpenCode 2:
+
+- Recall runs through the read-only `supermemory_recall` tool (search only). The installer
+  allows it without prompting; `add`, `forget`, and the rest stay behind the normal
+  `supermemory` permission. An explicit `deny` for `supermemory_recall` is preserved.
+- Compaction is native: the plugin enriches OpenCode's compaction request and saves the
+  summary instead of triggering compaction itself (`compactionEnabled`).
+- Recalled context is attached to the outgoing model request for the current prompt rather
+  than persisted into the transcript.
+
+To roll back on OpenCode 2 only, remove `"opencode-supermemory"` from `plugins` (or prefix
+it with `-`) and restart. The V1 `plugin` entry is unaffected.
 
 ## Tool usage
 
@@ -267,8 +341,11 @@ does not require a migration.
   // Extra keyword patterns for memory detection (regex)
   "keywordPatterns": ["log\\s+this", "write\\s+down"],
 
-  // Context usage ratio that triggers compaction (0-1)
+  // OpenCode V1: context usage ratio that triggers compaction (0-1)
   "compactionThreshold": 0.8,
+
+  // OpenCode 2: enrich native compaction with project memories and save summaries
+  "compactionEnabled": true,
 
   // Save completed conversation batches every N turns (0 = session end only)
   "captureEveryNTurns": 3,
@@ -332,13 +409,18 @@ bun run build
 bun run typecheck
 ```
 
-Local install:
+Local install (OpenCode V1 loads the built package; OpenCode 2 loads `server.ts` and
+`tui.ts` from the checkout, so `bun install` is enough):
 
 ```jsonc
 {
   "plugin": ["file:///path/to/opencode-supermemory"],
+  "plugins": ["/path/to/opencode-supermemory"],
 }
 ```
+
+`opencode plugin list` only shows package plugins, so confirm a checkout loaded by looking
+for `v2 plugin init` and `v2 plugin registered` in `~/.opencode-supermemory.log`.
 
 Logs:
 

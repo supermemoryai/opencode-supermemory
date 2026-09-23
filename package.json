@@ -1,27 +1,57 @@
 {
   "name": "opencode-supermemory",
-  "version": "2.0.14",
+  "version": "2.0.15",
   "description": "OpenCode plugin that gives coding agents persistent memory using Supermemory",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "import": "./dist/server.js",
+      "default": "./dist/server.js"
+    },
+    "./tui": {
+      "types": "./dist/tui.d.ts",
+      "import": "./dist/tui.js",
+      "default": "./dist/tui.js"
+    },
+    "./rpc": {
+      "types": "./dist/rpc.d.ts",
+      "import": "./dist/rpc.js",
+      "default": "./dist/rpc.js"
+    },
+    "./v2": {
+      "types": "./dist/v2/index.d.ts",
+      "import": "./dist/v2/index.js",
+      "default": "./dist/v2/index.js"
+    },
+    "./package.json": "./package.json"
+  },
   "bin": {
     "opencode-supermemory": "./dist/cli.js"
   },
   "scripts": {
     "generate:version": "node scripts/sync-version.mjs",
-    "build": "node scripts/sync-version.mjs && bun build ./src/index.ts --outdir ./dist --target node && bun build ./src/cli.ts --outfile ./dist/cli.js --target node && tsc --emitDeclarationOnly",
+    "build": "node scripts/sync-version.mjs && bun build ./src/index.ts ./src/server.ts ./src/tui.ts ./src/rpc.ts --outdir ./dist --target node && bun build ./src/v2/index.ts --outfile ./dist/v2/index.js --target node && bun build ./src/cli.ts --outfile ./dist/cli.js --target node && tsc --emitDeclarationOnly",
     "dev": "tsc --watch",
     "typecheck": "node scripts/sync-version.mjs && tsc --noEmit",
     "test": "node scripts/sync-version.mjs && bun test"
   },
   "keywords": [
-    "opencode",
-    "plugin",
-    "supermemory",
-    "memory",
     "ai",
-    "coding-agent"
+    "coding-agent",
+    "memory",
+    "opencode",
+    "opencode-plugin",
+    "opencode-v2",
+    "plugin",
+    "supermemory"
   ],
   "author": "Supermemory",
   "license": "MIT",
@@ -31,7 +61,9 @@
   },
   "devDependencies": {
     "@opencode-ai/plugin": "^1.0.162",
+    "@opencode/plugin": "2.0.15",
     "@types/bun": "latest",
+    "jsonc-parser": "3.3.1",
     "supermemory": "^4.0.0",
     "typescript": "^5.7.3"
   },
