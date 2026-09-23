@@ -270,6 +270,13 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
             type: "text",
             text: directRecall.context,
             synthetic: true,
+            metadata: {
+              supermemory: {
+                activity: "recalled",
+                count: directRecall.count,
+                tokens: directRecall.tokens,
+              },
+            },
           });
         }
 

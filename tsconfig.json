@@ -11,6 +11,8 @@
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": false,
     "verbatimModuleSyntax": true,
+    "jsx": "react-jsx",
+    "jsxImportSource": "@opentui/solid",
 
     // Output
     "outDir": "./dist",
