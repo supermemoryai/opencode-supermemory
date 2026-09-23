@@ -10,11 +10,12 @@ import {
 } from "./services/context.js";
 import { createCaptureHook } from "./services/capture.js";
 import {
-  buildDirectRecallContext,
+  buildDirectRecallResult,
   buildRecallDirective,
   DIRECT_RECALL_TIMEOUT_MS,
   RecallSessionCache,
 } from "./services/recall.js";
+import { createMemoryActivityReporter } from "./services/activity.js";
 import {
   formatRecallHit,
   normalizeRecallResult,
@@ -25,7 +26,7 @@ import { createCompactionHook, type CompactionContext } from "./services/compact
 
 import { isConfigured, CONFIG, PLUGIN_VERSION } from "./config.js";
 import { log } from "./services/logger.js";
-import { checkNpmUpdate, formatUpdateNotice } from "./services/version-check.js";
+import { checkNpmUpdate } from "./services/version-check.js";
 import type { MemoryScope, MemoryType } from "./types/index.js";
 
 const CODE_BLOCK_PATTERN = /```[\s\S]*?```/g;
@@ -53,10 +54,6 @@ function detectMemoryKeyword(text: string): boolean {
   return MEMORY_KEYWORD_PATTERN.test(textWithoutCode);
 }
 
-function combineContextParts(parts: Array<string | null | undefined>): string {
-  return parts.map((part) => part?.trim()).filter(Boolean).join("\n\n");
-}
-
 function isSupermemoryRecallSearch(input: Permission): boolean {
   const type = String((input as { type?: unknown }).type ?? "");
   const title = String((input as { title?: unknown }).title ?? "").toLowerCase();
@@ -80,6 +77,7 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
   const tags = getTags(directory);
   const injectedSessions = new Set<string>();
   const recallSessions = new RecallSessionCache();
+  const activity = createMemoryActivityReporter(ctx.client);
   log("Plugin init", { directory, tags, configured: isConfigured() });
 
   if (!isConfigured()) {
@@ -120,7 +118,7 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
       })
     : null;
   const captureHook = isConfigured() && ctx.client
-    ? createCaptureHook(ctx, tags)
+    ? createCaptureHook(ctx, tags, { onSaved: () => activity.saved() })
     : null;
 
   return {
@@ -190,9 +188,9 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
               )
             : Promise.resolve(null);
 
-        const directRecall =
+        const directRecallPromise =
           CONFIG.recallMode === "direct"
-            ? buildDirectRecallContext({
+            ? buildDirectRecallResult({
                 prompt: userMessage,
                 sessionID: input.sessionID,
                 cache: recallSessions,
@@ -212,36 +210,46 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
                     )
                   : undefined,
               })
-            : Promise.resolve("");
+            : Promise.resolve({
+                context: "",
+                status: "skipped" as const,
+                count: 0,
+                tokens: 0,
+              });
 
         const firstMessage = isFirstMessage
-          ? Promise.all([
-              profileRequest,
-              checkNpmUpdate(
-                "opencode-supermemory",
-                PLUGIN_VERSION,
-                UPDATE_COMMAND,
-              ),
-            ]).then(([profileResult, updateInfo]) => {
+          ? profileRequest.then((profileResult) => {
               const profile = profileResult?.success ? profileResult : null;
-              const memoryContext = profile
+              return profile
                 ? formatContextForPrompt(
                     profile,
                     { results: [] },
                     { results: [] },
                   )
                 : "";
-              return combineContextParts([
-                memoryContext,
-                updateInfo ? formatUpdateNotice(updateInfo) : null,
-              ]);
             })
           : Promise.resolve("");
 
-        const [directRecallContext, firstMessageContext] = await Promise.all([
-          directRecall,
+        const updateCheck = isFirstMessage
+          ? checkNpmUpdate(
+              "opencode-supermemory",
+              PLUGIN_VERSION,
+              UPDATE_COMMAND,
+            )
+          : Promise.resolve(null);
+
+        const [directRecall, firstMessageContext, updateInfo] = await Promise.all([
+          directRecallPromise,
           firstMessage,
+          updateCheck,
         ]);
+
+        if (directRecall.status === "recalled") {
+          activity.recalled(directRecall.count, directRecall.tokens);
+        } else if (directRecall.status === "unavailable") {
+          activity.recallUnavailable();
+        }
+        if (updateInfo) activity.updateAvailable(updateInfo);
 
         if (firstMessageContext) {
           output.parts.unshift({
@@ -254,13 +262,13 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
           });
         }
 
-        if (directRecallContext) {
+        if (directRecall.context) {
           output.parts.push({
             id: `prt_supermemory-direct-recall-${Date.now()}`,
             sessionID: input.sessionID,
             messageID: output.message.id,
             type: "text",
-            text: directRecallContext,
+            text: directRecall.context,
             synthetic: true,
           });
         }
@@ -268,7 +276,7 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
         log("chat.message: context processed", {
           duration: Date.now() - start,
           firstMessageContextLength: firstMessageContext.length,
-          directRecallContextLength: directRecallContext.length,
+          directRecallContextLength: directRecall.context.length,
         });
 
       } catch (error) {
@@ -406,6 +414,8 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
                     error: result.error || "Failed to add memory",
                   });
                 }
+
+                activity.saved();
 
                 return JSON.stringify({
                   success: true,
@@ -595,6 +605,34 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
         }
       } catch (error) {
         log("permission.ask: ERROR", { error: String(error) });
+      }
+    },
+
+    "tool.execute.before": async (input, output) => {
+      if (input.tool !== "supermemory") return;
+      const args = output.args as { mode?: unknown; query?: unknown };
+      if (args.mode === "search") {
+        activity.recalling(
+          typeof args.query === "string" ? args.query : undefined,
+        );
+      }
+    },
+
+    "tool.execute.after": async (input, output) => {
+      if (input.tool !== "supermemory") return;
+      try {
+        const result = JSON.parse(output.output) as {
+          success?: boolean;
+          count?: number;
+          results?: unknown[];
+        };
+        if (!result.success) return;
+        const count = result.count ?? result.results?.length;
+        if (typeof count === "number" && count > 0) {
+          activity.recalled(count, Math.round(output.output.length / 4));
+        }
+      } catch {
+        // Tool output remains authoritative when it is not structured JSON.
       }
     },
 

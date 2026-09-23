@@ -66,6 +66,7 @@ interface ConversationWriter {
 export interface CaptureOptions {
   captureEveryNTurns?: number;
   memoryClient?: ConversationWriter;
+  onSaved?: () => void;
 }
 
 function extractText(parts: Part[] | undefined): string {
@@ -281,6 +282,7 @@ export function createCaptureHook(
 
     if (result.success) {
       completedCaptureIds.add(captureId);
+      options?.onSaved?.();
       log("[capture] conversation batch saved", {
         sessionID,
         reason,

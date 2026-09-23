@@ -123,13 +123,20 @@ function formatDirectRecallContext(hits: RecallHit[]): string {
   ].join("\n");
 }
 
-export async function buildDirectRecallContext(options: {
+export interface DirectRecallResult {
+  context: string;
+  status: "skipped" | "empty" | "recalled" | "unavailable";
+  count: number;
+  tokens: number;
+}
+
+export async function buildDirectRecallResult(options: {
   prompt: string;
   sessionID: string;
   cache: RecallSessionCache;
   search: (query: string) => Promise<SearchResponse>;
   suppressTexts?: Iterable<string> | Promise<Iterable<string>>;
-}): Promise<string> {
+}): Promise<DirectRecallResult> {
   try {
     const query = prepareRecallQuery(options.prompt);
     // Begin the search before waiting for first-turn profile suppression. Both
@@ -146,14 +153,34 @@ export async function buildDirectRecallContext(options: {
         await options.suppressTexts,
       );
     }
-    if (!query) return "";
+    if (!query) {
+      return { context: "", status: "skipped", count: 0, tokens: 0 };
+    }
 
     const response = await searchPromise;
-    if (!response?.success) return "";
+    if (!response?.success) {
+      return { context: "", status: "unavailable", count: 0, tokens: 0 };
+    }
     const hits = normalizeRecallResults(response.results ?? []);
     const freshHits = options.cache.takeFresh(options.sessionID, hits);
-    return freshHits.length > 0 ? formatDirectRecallContext(freshHits) : "";
+    if (freshHits.length === 0) {
+      return { context: "", status: "empty", count: 0, tokens: 0 };
+    }
+
+    const context = formatDirectRecallContext(freshHits);
+    return {
+      context,
+      status: "recalled",
+      count: freshHits.length,
+      tokens: Math.round(context.length / 4),
+    };
   } catch {
-    return "";
+    return { context: "", status: "unavailable", count: 0, tokens: 0 };
   }
+}
+
+export async function buildDirectRecallContext(
+  options: Parameters<typeof buildDirectRecallResult>[0],
+): Promise<string> {
+  return (await buildDirectRecallResult(options)).context;
 }
