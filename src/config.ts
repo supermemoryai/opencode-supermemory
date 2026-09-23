@@ -13,6 +13,8 @@ const CONFIG_FILES = [
 
 export const DEFAULT_BASE_URL = "https://api.supermemory.ai";
 
+export type RecallMode = "direct" | "advisory" | "off";
+
 interface SupermemoryConfig {
   apiKey?: string;
   baseUrl?: string;
@@ -30,6 +32,7 @@ interface SupermemoryConfig {
   autoRecallEveryPrompt?: boolean;
   captureEveryNTurns?: number;
   recallDirective?: string | null;
+  recallMode?: RecallMode;
 }
 
 const DEFAULT_KEYWORD_PATTERNS = [
@@ -63,6 +66,7 @@ const DEFAULTS: Required<Omit<SupermemoryConfig, "apiKey" | "baseUrl" | "userCon
   compactionThreshold: 0.80,
   autoRecallEveryPrompt: false,
   captureEveryNTurns: 0,
+  recallMode: "direct",
 };
 
 function isValidRegex(pattern: string): boolean {
@@ -95,6 +99,20 @@ function validateCaptureEveryNTurns(
     return fallback;
   }
   return value;
+}
+
+function resolveRecallMode(): RecallMode {
+  if (
+    fileConfig.recallMode === "direct" ||
+    fileConfig.recallMode === "advisory" ||
+    fileConfig.recallMode === "off"
+  ) {
+    return fileConfig.recallMode;
+  }
+  if (fileConfig.recallDirective?.trim()) return "advisory";
+  if (fileConfig.autoRecallEveryPrompt === true) return "direct";
+  if (fileConfig.autoRecallEveryPrompt === false) return "advisory";
+  return DEFAULTS.recallMode;
 }
 
 function loadRawConfig(): { config: SupermemoryConfig; existed: boolean } {
@@ -172,6 +190,7 @@ export const CONFIG = {
   autoRecallEveryPrompt:
     fileConfig.autoRecallEveryPrompt ??
     (configExisted ? true : DEFAULTS.autoRecallEveryPrompt),
+  recallMode: resolveRecallMode(),
   captureEveryNTurns: validateCaptureEveryNTurns(
     fileConfig.captureEveryNTurns,
     configExisted ? 3 : DEFAULTS.captureEveryNTurns,
@@ -183,18 +202,23 @@ export function isConfigured(): boolean {
   return !!SUPERMEMORY_API_KEY;
 }
 
-export function getRecallConfig(): { directive: string | null } {
-  return { directive: CONFIG.recallDirective ?? null };
+export function getRecallConfig(): {
+  directive: string | null;
+  mode: RecallMode;
+} {
+  return {
+    directive: CONFIG.recallDirective ?? null,
+    mode: CONFIG.recallMode,
+  };
 }
 
 export function writeInstallDefaults(isExistingInstall: boolean): void {
   const current = loadRawConfig().config;
   const next: SupermemoryConfig = { ...current };
   if (isExistingInstall) {
-    if (next.autoRecallEveryPrompt === undefined) next.autoRecallEveryPrompt = true;
     if (next.captureEveryNTurns === undefined) next.captureEveryNTurns = 3;
   } else {
-    next.autoRecallEveryPrompt = false;
+    next.recallMode = "direct";
     next.captureEveryNTurns = 0;
   }
   writeFileSync(DEFAULT_CONFIG_FILE, JSON.stringify(next, null, 2));

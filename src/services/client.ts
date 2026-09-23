@@ -19,8 +19,13 @@ import type {
 } from "../types/index.js";
 
 const TIMEOUT_MS = 30000;
+const TIMEOUT_BACKSTOP_GRACE_MS = 250;
 const MAX_CONVERSATION_CHARS = 100_000;
 const OPENCODE_SOURCE = "opencode";
+
+export interface MemoryRequestOptions {
+  timeoutMs?: number;
+}
 
 export type MemoryScope = "personal" | "project";
 
@@ -172,19 +177,28 @@ export class SupermemoryClient {
     query: string,
     containerTag: string,
     scope?: MemoryScope,
+    options?: MemoryRequestOptions,
   ): Promise<SearchResponse> {
     log("searchMemories: start", { containerTag, scope });
     try {
+      const hookTimeout = options?.timeoutMs;
       const result = await withTimeout(
-        this.getClient().search.memories({
-          q: query,
-          containerTag,
-          threshold: CONFIG.similarityThreshold,
-          limit: CONFIG.maxMemories,
-          searchMode: "hybrid",
-          filters: scope ? getScopeFilters(scope) : undefined,
-        }),
-        TIMEOUT_MS,
+        this.getClient().search.memories(
+          {
+            q: query,
+            containerTag,
+            threshold: CONFIG.similarityThreshold,
+            limit: CONFIG.maxMemories,
+            searchMode: "hybrid",
+            filters: scope ? getScopeFilters(scope) : undefined,
+          },
+          hookTimeout
+            ? { timeout: hookTimeout, maxRetries: 0 }
+            : undefined,
+        ),
+        hookTimeout
+          ? hookTimeout + TIMEOUT_BACKSTOP_GRACE_MS
+          : TIMEOUT_MS,
       );
       const results = (result.results as SearchResultItem[]).map((item) => ({
         ...item,
@@ -214,11 +228,12 @@ export class SupermemoryClient {
   async searchMemoriesMany(
     query: string,
     containerTags: string[],
+    options?: MemoryRequestOptions,
   ): Promise<SearchResponse> {
     const uniqueTags = [...new Set(containerTags.filter(Boolean))];
     const responses = await Promise.all(
       uniqueTags.map((containerTag) =>
-        this.searchMemories(query, containerTag),
+        this.searchMemories(query, containerTag, undefined, options),
       ),
     );
     return mergeSearchResponses(responses, CONFIG.maxMemories);
@@ -229,6 +244,7 @@ export class SupermemoryClient {
     canonicalTag: string,
     containerTags: string[],
     scope: MemoryScope,
+    options?: MemoryRequestOptions,
   ): Promise<SearchResponse> {
     const legacyTags = [
       ...new Set(
@@ -240,9 +256,36 @@ export class SupermemoryClient {
         query,
         canonicalTag,
         supportsScopedCanonicalTag(canonicalTag) ? scope : undefined,
+        options,
       ),
       ...legacyTags.map((containerTag) =>
-        this.searchMemories(query, containerTag),
+        this.searchMemories(query, containerTag, undefined, options),
+      ),
+    ]);
+    return mergeSearchResponses(responses, CONFIG.maxMemories);
+  }
+
+  async searchMemoriesForRecall(
+    query: string,
+    canonicalTag: string,
+    personalTags: string[],
+    projectTags: string[],
+    options?: MemoryRequestOptions,
+  ): Promise<SearchResponse> {
+    const responses = await Promise.all([
+      this.searchMemoriesScoped(
+        query,
+        canonicalTag,
+        personalTags,
+        "personal",
+        options,
+      ),
+      this.searchMemoriesScoped(
+        query,
+        canonicalTag,
+        projectTags,
+        "project",
+        options,
       ),
     ]);
     return mergeSearchResponses(responses, CONFIG.maxMemories);
@@ -252,9 +295,11 @@ export class SupermemoryClient {
     containerTag: string,
     query?: string,
     scope?: MemoryScope,
+    options?: MemoryRequestOptions,
   ): Promise<ProfileResponse> {
     log("getProfile: start", { containerTag, scope });
     try {
+      const hookTimeout = options?.timeoutMs;
       const result = await withTimeout(
         this.getClient().profile(
           {
@@ -262,8 +307,13 @@ export class SupermemoryClient {
             q: query,
             filters: scope ? getScopeFilters(scope) : undefined,
           } as Parameters<Supermemory["profile"]>[0],
+          hookTimeout
+            ? { timeout: hookTimeout, maxRetries: 0 }
+            : undefined,
         ),
-        TIMEOUT_MS,
+        hookTimeout
+          ? hookTimeout + TIMEOUT_BACKSTOP_GRACE_MS
+          : TIMEOUT_MS,
       );
       const searchResults = result.searchResults
         ? {
@@ -301,11 +351,12 @@ export class SupermemoryClient {
   async getProfileMany(
     containerTags: string[],
     query?: string,
+    options?: MemoryRequestOptions,
   ): Promise<ProfileResponse> {
     const uniqueTags = [...new Set(containerTags.filter(Boolean))];
     const responses = await Promise.all(
       uniqueTags.map((containerTag) =>
-        this.getProfile(containerTag, query),
+        this.getProfile(containerTag, query, undefined, options),
       ),
     );
     return mergeProfileResponses(responses, CONFIG.maxMemories);
@@ -316,6 +367,7 @@ export class SupermemoryClient {
     containerTags: string[],
     scope: MemoryScope,
     query?: string,
+    options?: MemoryRequestOptions,
   ): Promise<ProfileResponse> {
     const legacyTags = [
       ...new Set(
@@ -327,9 +379,10 @@ export class SupermemoryClient {
         canonicalTag,
         query,
         supportsScopedCanonicalTag(canonicalTag) ? scope : undefined,
+        options,
       ),
       ...legacyTags.map((containerTag) =>
-        this.getProfile(containerTag, query),
+        this.getProfile(containerTag, query, undefined, options),
       ),
     ]);
     return mergeProfileResponses(responses, CONFIG.maxMemories);
