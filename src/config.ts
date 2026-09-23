@@ -29,6 +29,8 @@ interface SupermemoryConfig {
   filterPrompt?: string;
   keywordPatterns?: string[];
   compactionThreshold?: number;
+  /** OpenCode 2 only: enrich native compaction with project memories and save summaries. */
+  compactionEnabled?: boolean;
   autoRecallEveryPrompt?: boolean;
   captureEveryNTurns?: number;
   recallDirective?: string | null;
@@ -64,6 +66,7 @@ const DEFAULTS: Required<Omit<SupermemoryConfig, "apiKey" | "baseUrl" | "userCon
   filterPrompt: "You are a stateful coding agent. Remember all the information, including but not limited to user's coding preferences, tech stack, behaviours, workflows, and any other relevant details.",
   keywordPatterns: [],
   compactionThreshold: 0.80,
+  compactionEnabled: true,
   autoRecallEveryPrompt: false,
   captureEveryNTurns: 0,
   recallMode: "direct",
@@ -187,6 +190,10 @@ export const CONFIG = {
     ...(fileConfig.keywordPatterns ?? []).filter(isValidRegex),
   ],
   compactionThreshold: validateCompactionThreshold(fileConfig.compactionThreshold),
+  compactionEnabled:
+    typeof fileConfig.compactionEnabled === "boolean"
+      ? fileConfig.compactionEnabled
+      : DEFAULTS.compactionEnabled,
   autoRecallEveryPrompt:
     fileConfig.autoRecallEveryPrompt ??
     (configExisted ? true : DEFAULTS.autoRecallEveryPrompt),

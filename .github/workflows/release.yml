@@ -50,6 +50,10 @@ jobs:
         if: steps.version-check.outputs.changed == 'true'
         run: bun run typecheck
 
+      - name: Test
+        if: steps.version-check.outputs.changed == 'true'
+        run: bun test
+
       - name: Build
         if: steps.version-check.outputs.changed == 'true'
         run: bun run build

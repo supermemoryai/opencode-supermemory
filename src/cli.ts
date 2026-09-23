@@ -3,19 +3,29 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import * as readline from "node:readline";
-import { stripJsoncComments } from "./services/jsonc.js";
 import { startAuthFlow, clearCredentials, loadCredentials, CREDENTIALS_FILE } from "./services/auth.js";
 import { CONFIG, CONFIG_FILE, SUPERMEMORY_API_KEY, getApiBaseUrl, isConfigured, writeInstallDefaults } from "./config.js";
 import { SupermemoryClient } from "./services/client.js";
 import { getTags } from "./services/tags.js";
+import {
+  editOpenCodeConfig,
+  editOpenCodeTuiConfig,
+  readOpenCodeRegistration,
+  readOpenCodeTuiRegistration,
+  V1_PLUGIN_ENTRY,
+  V2_PLUGIN_ENTRY,
+} from "./services/opencode-config.js";
 
 const OPENCODE_CONFIG_DIR = join(homedir(), ".config", "opencode");
 const OPENCODE_COMMAND_DIRS = [
   join(OPENCODE_CONFIG_DIR, "commands"),
   join(OPENCODE_CONFIG_DIR, "command"),
 ];
+const OPENCODE_TUI_CONFIGS = [
+  join(OPENCODE_CONFIG_DIR, "tui.jsonc"),
+  join(OPENCODE_CONFIG_DIR, "tui.json"),
+];
 const OH_MY_OPENCODE_CONFIG = join(OPENCODE_CONFIG_DIR, "oh-my-opencode.json");
-const PLUGIN_NAME = "opencode-supermemory@latest";
 const DEFAULT_CONFIG_FILE = CONFIG_FILE ?? join(OPENCODE_CONFIG_DIR, "supermemory.json");
 
 const SUPERMEMORY_INDEX_COMMAND = `---
@@ -275,51 +285,18 @@ function findOpencodeConfig(): string | null {
 function addPluginToConfig(configPath: string): boolean {
   try {
     const content = readFileSync(configPath, "utf-8");
-    
-    if (content.includes("opencode-supermemory")) {
-      console.log("✓ Plugin already registered in config");
-      return true;
-    }
+    const result = editOpenCodeConfig(content);
 
-    const jsonContent = stripJsoncComments(content);
-    let config: Record<string, unknown>;
-    
-    try {
-      config = JSON.parse(jsonContent);
-    } catch {
-      console.error("✗ Failed to parse config file");
-      return false;
-    }
-
-    const plugins = (config.plugin as string[]) || [];
-    plugins.push(PLUGIN_NAME);
-    config.plugin = plugins;
-
-    if (configPath.endsWith(".jsonc")) {
-      if (content.includes('"plugin"')) {
-        const newContent = content.replace(
-          /("plugin"\s*:\s*\[)([^\]]*?)(\])/,
-          (_match, start, middle, end) => {
-            const trimmed = middle.trim();
-            if (trimmed === "") {
-              return `${start}\n    "${PLUGIN_NAME}"\n  ${end}`;
-            }
-            return `${start}${middle.trimEnd()},\n    "${PLUGIN_NAME}"\n  ${end}`;
-          }
-        );
-        writeFileSync(configPath, newContent);
-      } else {
-        const newContent = content.replace(
-          /^(\s*\{)/,
-          `$1\n  "plugin": ["${PLUGIN_NAME}"],`
-        );
-        writeFileSync(configPath, newContent);
-      }
+    if (result.changed) {
+      writeFileSync(configPath, result.content);
+      console.log(`✓ Registered plugin for OpenCode V1 ("plugin") and OpenCode 2 ("plugins") in ${configPath}`);
     } else {
-      writeFileSync(configPath, JSON.stringify(config, null, 2));
+      console.log("✓ Plugin already registered for OpenCode V1 and OpenCode 2");
     }
 
-    console.log(`✓ Added plugin to ${configPath}`);
+    for (const warning of result.warnings) {
+      console.warn(`⚠ ${warning}`);
+    }
     return true;
   } catch (err) {
     console.error("✗ Failed to update config:", err);
@@ -330,19 +307,35 @@ function addPluginToConfig(configPath: string): boolean {
 function createNewConfig(): boolean {
   const configPath = join(OPENCODE_CONFIG_DIR, "opencode.jsonc");
   mkdirSync(OPENCODE_CONFIG_DIR, { recursive: true });
-  
-  const config = `{
-  "plugin": ["${PLUGIN_NAME}"]
-}
-`;
-  
-  writeFileSync(configPath, config);
+
+  const config = editOpenCodeConfig("{}\n");
+  writeFileSync(configPath, config.content);
   console.log(`✓ Created ${configPath}`);
   return true;
 }
 
+function configureTuiPlugin(): boolean {
+  const configPath = OPENCODE_TUI_CONFIGS.find((path) => existsSync(path)) ?? OPENCODE_TUI_CONFIGS[0]!;
+  try {
+    const content = existsSync(configPath) ? readFileSync(configPath, "utf-8") : "";
+    const result = editOpenCodeTuiConfig(content);
+    if (result.changed) {
+      mkdirSync(OPENCODE_CONFIG_DIR, { recursive: true });
+      writeFileSync(configPath, result.content);
+      console.log(`✓ Enabled the persistent Supermemory footer for OpenCode V1 in ${configPath}`);
+    } else {
+      console.log("✓ Persistent Supermemory footer already enabled for OpenCode V1");
+    }
+    console.log("  OpenCode 2 loads the footer automatically from the plugin package.");
+    return true;
+  } catch (err) {
+    console.error("✗ Failed to update TUI config:", err);
+    return false;
+  }
+}
+
 function createCommands(): boolean {
-  const files = [
+  const files: Array<[string, string]> = [
     ["supermemory-index.md", SUPERMEMORY_INDEX_COMMAND],
     ["supermemory-init.md", SUPERMEMORY_INDEX_COMMAND],
     ["supermemory-login.md", SUPERMEMORY_LOGIN_COMMAND],
@@ -428,7 +421,7 @@ async function install(options: InstallOptions): Promise<number> {
   const rl = options.tui ? createReadline() : null;
 
   // Step 1: Register plugin in config
-  console.log("Step 1: Register plugin in OpenCode config");
+  console.log("Step 1: Register plugin in OpenCode config (OpenCode V1 and OpenCode 2)");
   const configPath = findOpencodeConfig();
   
   if (configPath) {
@@ -454,6 +447,8 @@ async function install(options: InstallOptions): Promise<number> {
       createNewConfig();
     }
   }
+
+  configureTuiPlugin();
 
   // Step 2: Create commands
   console.log("\nStep 2: Create /supermemory-index, /supermemory-init, /supermemory-login, /supermemory-logout, and /supermemory-status commands");
@@ -508,7 +503,7 @@ async function install(options: InstallOptions): Promise<number> {
   console.log("\nOr set your API key manually:");
   console.log('  export SUPERMEMORY_API_KEY="sm_..."');
   console.log("\n" + "─".repeat(50));
-  console.log("\n✓ Setup complete! Restart OpenCode to activate.\n");
+  console.log("\n✓ Setup complete! Restart OpenCode (V1 and/or OpenCode 2) to activate.\n");
   return 0;
 }
 
@@ -592,6 +587,40 @@ async function getAccountInfo(apiUrl: string): Promise<{ email?: string; name?: 
   };
 }
 
+function describeOpenCodeRegistration(): string[] {
+  const configPath = findOpencodeConfig();
+  if (!configPath) {
+    return [`OpenCode config: not found (run \`bunx opencode-supermemory@latest install\`)`];
+  }
+  try {
+    const registration = readOpenCodeRegistration(readFileSync(configPath, "utf-8"));
+    const v2Permission = registration.recallDenied
+      ? "recall denied"
+      : registration.recallAllowed
+        ? "recall auto-allowed"
+        : "default permissions";
+    const tuiConfig = OPENCODE_TUI_CONFIGS.find((path) => existsSync(path));
+    let tuiFooter = "missing (re-run install)";
+    if (tuiConfig) {
+      try {
+        if (readOpenCodeTuiRegistration(readFileSync(tuiConfig, "utf-8"))) {
+          tuiFooter = `registered (${tuiConfig})`;
+        }
+      } catch {
+        tuiFooter = `unreadable (${tuiConfig})`;
+      }
+    }
+    return [
+      `OpenCode config: ${configPath}`,
+      `OpenCode V1 plugin entry: ${registration.v1 ? "registered" : `missing (add \"${V1_PLUGIN_ENTRY}\" to \"plugin\")`}`,
+      `OpenCode V1 TUI footer: ${tuiFooter}`,
+      `OpenCode 2 plugin entry: ${registration.v2 ? `registered (${v2Permission}; footer loads automatically)` : `missing (add \"${V2_PLUGIN_ENTRY}\" to \"plugins\")`}`,
+    ];
+  } catch (error) {
+    return [`OpenCode config: ${configPath} (unreadable: ${error instanceof Error ? error.message : String(error)})`];
+  }
+}
+
 async function status(): Promise<number> {
   const apiUrl = getApiBaseUrl();
   const tags = getTags(process.cwd());
@@ -609,6 +638,7 @@ async function status(): Promise<number> {
   lines.push(`Project container: ${tags.canonical}`);
   lines.push(`Personal reads: ${tags.personalReads.join(", ")}`);
   lines.push(`Project reads: ${tags.projectReads.join(", ")}`);
+  lines.push(...describeOpenCodeRegistration());
 
   if (!isConfigured()) {
     lines.push("");
