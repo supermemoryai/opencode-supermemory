@@ -10,16 +10,19 @@ import { SupermemoryClient } from "./services/client.js";
 import { getTags } from "./services/tags.js";
 
 const OPENCODE_CONFIG_DIR = join(homedir(), ".config", "opencode");
-const OPENCODE_COMMAND_DIR = join(OPENCODE_CONFIG_DIR, "command");
+const OPENCODE_COMMAND_DIRS = [
+  join(OPENCODE_CONFIG_DIR, "commands"),
+  join(OPENCODE_CONFIG_DIR, "command"),
+];
 const OH_MY_OPENCODE_CONFIG = join(OPENCODE_CONFIG_DIR, "oh-my-opencode.json");
 const PLUGIN_NAME = "opencode-supermemory@latest";
 const DEFAULT_CONFIG_FILE = CONFIG_FILE ?? join(OPENCODE_CONFIG_DIR, "supermemory.json");
 
-const SUPERMEMORY_INIT_COMMAND = `---
-description: Initialize Supermemory with comprehensive codebase knowledge
+const SUPERMEMORY_INDEX_COMMAND = `---
+description: Index this codebase into Supermemory
 ---
 
-# Initializing Supermemory
+# Indexing Codebase into Supermemory
 
 You are initializing persistent memory for this codebase. This is not just data collection - you're building context that will make you significantly more effective across all future sessions.
 
@@ -77,11 +80,27 @@ This is a **deep research** initialization. Take your time and be thorough (~50+
 
 ## Research Techniques
 
+### Ecosystem auto-detect
+Identify the language/ecosystem from manifests and configs **before** deep research. A repo may use more than one; research each that is present. Do not assume JavaScript/TypeScript.
+
+- **JS/TS**: package.json, bun.lock, bun.lockb, pnpm-lock.yaml, yarn.lock, package-lock.json, tsconfig.json, jsconfig.json, deno.json, biome.json
+- **Python**: pyproject.toml, requirements.txt, setup.py, setup.cfg, Pipfile, poetry.lock, environment.yml, tox.ini
+- **Go**: go.mod, go.sum
+- **Rust**: Cargo.toml, Cargo.lock
+- **.NET/C#**: *.csproj, *.fsproj, *.vbproj, *.sln, nuget.config, Directory.Build.props, global.json
+- **Java/Kotlin**: pom.xml, build.gradle, build.gradle.kts, settings.gradle, settings.gradle.kts, gradlew
+- **Ruby**: Gemfile, Gemfile.lock, Rakefile, *.gemspec
+- **PHP**: composer.json, composer.lock
+- **Swift**: Package.swift, Package.resolved, *.xcodeproj, *.xcworkspace
+- **Elixir**: mix.exs, mix.lock
+
+Use the matching toolchain for commands, tests, and conventions (not JS/TS defaults unless that is the detected ecosystem).
+
 ### File-based
 - README.md, CONTRIBUTING.md, AGENTS.md, CLAUDE.md
-- Package manifests (package.json, Cargo.toml, pyproject.toml, go.mod)
-- Config files (.eslintrc, tsconfig.json, .prettierrc)
-- CI/CD configs (.github/workflows/)
+- Package manifests for the detected ecosystem(s) (package.json, Cargo.toml, pyproject.toml, go.mod, *.csproj, pom.xml, build.gradle, Gemfile, composer.json, Package.swift, mix.exs)
+- Config files (.eslintrc, tsconfig.json, .prettierrc, pyproject.toml, .golangci.yml, rustfmt.toml, .editorconfig)
+- CI/CD configs (.github/workflows/, .gitlab-ci.yml, azure-pipelines.yml)
 
 ### Git-based
 - \`git log --oneline -20\` - Recent history
@@ -119,7 +138,7 @@ Good (thorough):
 Use the \`supermemory\` tool for each distinct insight:
 
 \`\`\`
-supermemory(mode: "add", content: "...", type: "...", scope: "project")
+supermemory(mode: "add", content: "...", type: "project-config"|"architecture"|"learned-pattern"|"error-solution"|"preference", scope: "project"|"user")
 \`\`\`
 
 **Types:**
@@ -160,12 +179,12 @@ Then ask: "I've initialized memory with X insights. Want me to continue refining
 ## Your Task
 
 1. Ask upfront questions (research depth, rules, preferences)
-2. Check existing memories: \`supermemory(mode: "list", scope: "project")\`
-3. Research based on chosen depth
+2. Check existing memories first: \`supermemory(mode: "list", scope: "project")\`
+3. Auto-detect the ecosystem(s), then research based on chosen depth
 4. Save memories incrementally as you discover insights
 5. Reflect and verify completeness
 6. Summarize what was learned and ask if user wants refinement
-`;
+`
 
 const SUPERMEMORY_LOGIN_COMMAND = `---
 description: Authenticate with Supermemory via browser
@@ -323,22 +342,25 @@ function createNewConfig(): boolean {
 }
 
 function createCommands(): boolean {
-  mkdirSync(OPENCODE_COMMAND_DIR, { recursive: true });
+  const files = [
+    ["supermemory-index.md", SUPERMEMORY_INDEX_COMMAND],
+    ["supermemory-init.md", SUPERMEMORY_INDEX_COMMAND],
+    ["supermemory-login.md", SUPERMEMORY_LOGIN_COMMAND],
+    ["supermemory-logout.md", SUPERMEMORY_LOGOUT_COMMAND],
+    ["supermemory-status.md", SUPERMEMORY_STATUS_COMMAND],
+  ];
 
-  const initPath = join(OPENCODE_COMMAND_DIR, "supermemory-init.md");
-  writeFileSync(initPath, SUPERMEMORY_INIT_COMMAND);
+  for (const dir of OPENCODE_COMMAND_DIRS) {
+    mkdirSync(dir, { recursive: true });
+    for (const [name, body] of files) {
+      writeFileSync(join(dir, name), body);
+    }
+  }
+
+  console.log(`✓ Created /supermemory-index command`);
   console.log(`✓ Created /supermemory-init command`);
-
-  const loginPath = join(OPENCODE_COMMAND_DIR, "supermemory-login.md");
-  writeFileSync(loginPath, SUPERMEMORY_LOGIN_COMMAND);
   console.log(`✓ Created /supermemory-login command`);
-
-  const logoutPath = join(OPENCODE_COMMAND_DIR, "supermemory-logout.md");
-  writeFileSync(logoutPath, SUPERMEMORY_LOGOUT_COMMAND);
   console.log(`✓ Created /supermemory-logout command`);
-
-  const statusPath = join(OPENCODE_COMMAND_DIR, "supermemory-status.md");
-  writeFileSync(statusPath, SUPERMEMORY_STATUS_COMMAND);
   console.log(`✓ Created /supermemory-status command`);
 
   return true;
@@ -434,7 +456,7 @@ async function install(options: InstallOptions): Promise<number> {
   }
 
   // Step 2: Create commands
-  console.log("\nStep 2: Create /supermemory-init, /supermemory-login, /supermemory-logout, and /supermemory-status commands");
+  console.log("\nStep 2: Create /supermemory-index, /supermemory-init, /supermemory-login, /supermemory-logout, and /supermemory-status commands");
   if (options.tui) {
     const shouldCreate = await confirm(rl!, "Add supermemory commands?");
     if (!shouldCreate) {

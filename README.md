@@ -56,7 +56,10 @@ This registers the plugin in `~/.config/opencode/opencode.jsonc` and creates the
 [Oh My OpenCode](#usage-with-oh-my-opencode) installed, to avoid its auto-compact hook
 fighting with this plugin's compaction.
 
-**Step 2: Verify the config**
+- Register the plugin in `~/.config/opencode/opencode.jsonc`
+- Create the `/supermemory-index` command (`/supermemory-init` is an alias)
+
+#### Step 2: Verify the config
 
 ```bash
 cat ~/.config/opencode/opencode.jsonc
@@ -96,7 +99,7 @@ the plugin is in `opencode.jsonc`, and `~/.opencode-supermemory.log` for errors.
 
 **Step 5: Initialize codebase memory (optional)**
 
-Run `/supermemory-init` to have the agent explore and memorize the codebase.
+Run `/supermemory-index` to have the agent explore and memorize the codebase. `/supermemory-init` is an alias.
 
 </details>
 
@@ -124,8 +127,48 @@ Relevant Memories:
 - [82%] Build fails if .env.local missing
 ```
 
-That's what the agent sees on the first message, invisible to you, used automatically
-with no manual prompting needed.
+The agent uses this context automatically - no manual prompting needed.
+
+### Reasoned Recall
+
+On **every** turn, the agent is shown a short directive asking it to silently
+decide whether recalling saved memory would improve its answer to *this*
+message. The model searches only when earlier work, saved conventions, or user
+preferences are likely to help; trivial and self-contained messages skip the
+network call.
+
+Recall uses the `supermemory` tool in `search` mode and is auto-approved.
+Customize the directive with `recallDirective`. Set `SUPERMEMORY_DEBUG=1` to
+show a `[recall-decision]` line in each reply while testing.
+
+### Automatic Capture
+
+Completed conversations are captured automatically:
+
+- Every `captureEveryNTurns` completed turns, OpenCode saves the new turn batch.
+- Any remaining turns are flushed when the session is deleted or the OpenCode
+  instance shuts down.
+- Synthetic plugin context is excluded and `<private>` content is redacted.
+- Stable capture IDs make repeated lifecycle events idempotent.
+
+### Keyword Detection
+
+Say "remember", "save this", "don't forget" etc. and the agent auto-saves to memory.
+
+```
+You: "Remember that this project uses bun"
+Agent: [saves to project memory]
+```
+
+Add custom triggers via `keywordPatterns` config.
+
+### Codebase Indexing
+
+Run `/supermemory-index` to explore and memorize your codebase structure, patterns, and conventions. `/supermemory-init` is an alias.
+
+### Preemptive Compaction
+
+When context hits 80% capacity:
 
 Set `SUPERMEMORY_DEBUG=1` to show a `[recall-decision]` line in each reply while testing
 recall.
