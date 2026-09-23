@@ -161,8 +161,9 @@ const setup: TuiPlugin.Definition["setup"] = (context) => {
       {statusText(status.running(), status.activity())}
     </text>
   );
+  // The prompt footer is present on both the home screen and in sessions, so
+  // one slot is enough; a second entry in home.footer.status would duplicate it.
   stops.push(context.ui.slot({ append: "prompt.footer.status", render }));
-  stops.push(context.ui.slot({ append: "home.footer.status", render }));
 
   return () => {
     for (const stop of stops.splice(0)) stop();

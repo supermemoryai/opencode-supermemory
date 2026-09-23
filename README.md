@@ -205,7 +205,7 @@ server plugin.
 The same TUI plugin keeps a persistent `◪ supermemory` footer. It turns blue while a
 session is running and otherwise shows the latest recall or save activity. On OpenCode V1
 the installer enables it through `~/.config/opencode/tui.jsonc`; on OpenCode 2 it appears
-in the prompt and home footers without extra configuration.
+in the prompt footer without extra configuration.
 
 Set `SUPERMEMORY_DEBUG=1` to show a `[recall-decision]` line in each reply while testing
 advisory recall.
