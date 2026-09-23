@@ -9,7 +9,9 @@ import { SupermemoryClient } from "./services/client.js";
 import { getTags } from "./services/tags.js";
 import {
   editOpenCodeConfig,
+  editOpenCodeTuiConfig,
   readOpenCodeRegistration,
+  readOpenCodeTuiRegistration,
   V1_PLUGIN_ENTRY,
   V2_PLUGIN_ENTRY,
 } from "./services/opencode-config.js";
@@ -18,6 +20,10 @@ const OPENCODE_CONFIG_DIR = join(homedir(), ".config", "opencode");
 const OPENCODE_COMMAND_DIRS = [
   join(OPENCODE_CONFIG_DIR, "commands"),
   join(OPENCODE_CONFIG_DIR, "command"),
+];
+const OPENCODE_TUI_CONFIGS = [
+  join(OPENCODE_CONFIG_DIR, "tui.jsonc"),
+  join(OPENCODE_CONFIG_DIR, "tui.json"),
 ];
 const OH_MY_OPENCODE_CONFIG = join(OPENCODE_CONFIG_DIR, "oh-my-opencode.json");
 const DEFAULT_CONFIG_FILE = CONFIG_FILE ?? join(OPENCODE_CONFIG_DIR, "supermemory.json");
@@ -308,6 +314,26 @@ function createNewConfig(): boolean {
   return true;
 }
 
+function configureTuiPlugin(): boolean {
+  const configPath = OPENCODE_TUI_CONFIGS.find((path) => existsSync(path)) ?? OPENCODE_TUI_CONFIGS[0]!;
+  try {
+    const content = existsSync(configPath) ? readFileSync(configPath, "utf-8") : "";
+    const result = editOpenCodeTuiConfig(content);
+    if (result.changed) {
+      mkdirSync(OPENCODE_CONFIG_DIR, { recursive: true });
+      writeFileSync(configPath, result.content);
+      console.log(`✓ Enabled the persistent Supermemory footer for OpenCode V1 in ${configPath}`);
+    } else {
+      console.log("✓ Persistent Supermemory footer already enabled for OpenCode V1");
+    }
+    console.log("  OpenCode 2 loads the footer automatically from the plugin package.");
+    return true;
+  } catch (err) {
+    console.error("✗ Failed to update TUI config:", err);
+    return false;
+  }
+}
+
 function createCommands(): boolean {
   const files: Array<[string, string]> = [
     ["supermemory-index.md", SUPERMEMORY_INDEX_COMMAND],
@@ -421,6 +447,8 @@ async function install(options: InstallOptions): Promise<number> {
       createNewConfig();
     }
   }
+
+  configureTuiPlugin();
 
   // Step 2: Create commands
   console.log("\nStep 2: Create /supermemory-index, /supermemory-init, /supermemory-login, /supermemory-logout, and /supermemory-status commands");
@@ -571,10 +599,22 @@ function describeOpenCodeRegistration(): string[] {
       : registration.recallAllowed
         ? "recall auto-allowed"
         : "default permissions";
+    const tuiConfig = OPENCODE_TUI_CONFIGS.find((path) => existsSync(path));
+    let tuiFooter = "missing (re-run install)";
+    if (tuiConfig) {
+      try {
+        if (readOpenCodeTuiRegistration(readFileSync(tuiConfig, "utf-8"))) {
+          tuiFooter = `registered (${tuiConfig})`;
+        }
+      } catch {
+        tuiFooter = `unreadable (${tuiConfig})`;
+      }
+    }
     return [
       `OpenCode config: ${configPath}`,
       `OpenCode V1 plugin entry: ${registration.v1 ? "registered" : `missing (add \"${V1_PLUGIN_ENTRY}\" to \"plugin\")`}`,
-      `OpenCode 2 plugin entry: ${registration.v2 ? `registered (${v2Permission})` : `missing (add \"${V2_PLUGIN_ENTRY}\" to \"plugins\")`}`,
+      `OpenCode V1 TUI footer: ${tuiFooter}`,
+      `OpenCode 2 plugin entry: ${registration.v2 ? `registered (${v2Permission}; footer loads automatically)` : `missing (add \"${V2_PLUGIN_ENTRY}\" to \"plugins\")`}`,
     ];
   } catch (error) {
     return [`OpenCode config: ${configPath} (unreadable: ${error instanceof Error ? error.message : String(error)})`];

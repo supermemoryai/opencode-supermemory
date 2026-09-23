@@ -194,13 +194,18 @@ On OpenCode 2, OpenCode owns the compaction trigger and model. The plugin hooks 
 compaction request to add the same project memories, then saves each successful summary as
 a memory. Set `compactionEnabled: false` to opt out on OpenCode 2.
 
-### Activity Notices
+### Activity Notices and Status Footer
 
 Supermemory shows a short native notice when it recalls memories, saves a turn, falls open
 because recall was unavailable, or a newer release exists. Notices never enter model
 context. On OpenCode V1 they are TUI toasts; on OpenCode 2 they are rendered by the
 `opencode-supermemory/tui` companion, which OpenCode loads automatically next to the
 server plugin.
+
+The same TUI plugin keeps a persistent `◪ supermemory` footer. It turns blue while a
+session is running and otherwise shows the latest recall or save activity. On OpenCode V1
+the installer enables it through `~/.config/opencode/tui.jsonc`; on OpenCode 2 it appears
+in the prompt and home footers without extra configuration.
 
 Set `SUPERMEMORY_DEBUG=1` to show a `[recall-decision]` line in each reply while testing
 advisory recall.
@@ -232,7 +237,7 @@ What is the same on both generations:
 - First-message profile injection, keyword nudges, and automatic capture with the same
   cadence, privacy redaction, and idempotent capture IDs
 - The `supermemory` tool with identical modes, scopes, and result formatting
-- Activity notices and update checks
+- Activity notices, the persistent status footer, and update checks
 
 What differs on OpenCode 2:
 
@@ -413,11 +418,17 @@ Local install (OpenCode V1 loads the built package; OpenCode 2 loads `server.ts`
 `tui.ts` from the checkout, so `bun install` is enough):
 
 ```jsonc
+// ~/.config/opencode/opencode.jsonc
 {
   "plugin": ["file:///path/to/opencode-supermemory"],
   "plugins": ["/path/to/opencode-supermemory"],
 }
 ```
+
+The TUI side of a local checkout is registered separately: OpenCode V1 reads
+`~/.config/opencode/tui.jsonc` (`"plugin": ["file:///path/to/opencode-supermemory/dist/tui.js"]`)
+and OpenCode 2 reads `~/.config/opencode/cli.json` (`"plugins": ["/path/to/opencode-supermemory"]`).
+Published packages need neither; both generations find the `./tui` export on their own.
 
 `opencode plugin list` only shows package plugins, so confirm a checkout loaded by looking
 for `v2 plugin init` and `v2 plugin registered` in `~/.opencode-supermemory.log`.

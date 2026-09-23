@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 
 import {
   editOpenCodeConfig,
+  editOpenCodeTuiConfig,
   readOpenCodeRegistration,
+  readOpenCodeTuiRegistration,
   RECALL_PERMISSION,
   V1_PLUGIN_ENTRY,
   V2_PLUGIN_ENTRY,
@@ -72,5 +74,18 @@ describe("OpenCode config editor", () => {
     expect(() => editOpenCodeConfig('{"plugins": "nope"}')).toThrow(
       /must be an array/,
     );
+  });
+});
+
+describe("OpenCode V1 TUI config editor", () => {
+  test("adds the package to tui.jsonc once and recognises local builds", () => {
+    const first = editOpenCodeTuiConfig("");
+    expect(JSON.parse(first.content)).toEqual({ plugin: [V1_PLUGIN_ENTRY] });
+    expect(editOpenCodeTuiConfig(first.content).changed).toBe(false);
+
+    const local = '{\n  "plugin": ["file:///Users/me/opencode-supermemory/dist/tui.js"]\n}\n';
+    expect(editOpenCodeTuiConfig(local).changed).toBe(false);
+    expect(readOpenCodeTuiRegistration(local)).toBe(true);
+    expect(readOpenCodeTuiRegistration('{"plugin": ["other"]}')).toBe(false);
   });
 });

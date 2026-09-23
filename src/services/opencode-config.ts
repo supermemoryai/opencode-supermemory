@@ -33,6 +33,25 @@ export interface OpenCodeRegistration {
   recallDenied: boolean;
 }
 
+/**
+ * OpenCode V1 loads TUI plugins from the `plugin` array of `tui.jsonc`. Adds
+ * the package there so the persistent footer appears; OpenCode 2 finds the
+ * `./tui` export on its own.
+ */
+export function editOpenCodeTuiConfig(rawContent: string): OpenCodeConfigEditResult {
+  const original = rawContent;
+  let content = rawContent.trim() === "" ? "{}\n" : rawContent;
+  parseOpenCodeConfig(content);
+  content = addArrayEntry(content, "plugin", V1_PLUGIN_ENTRY, isSupermemoryPluginEntry);
+  return { content, changed: content !== original, warnings: [] };
+}
+
+export function readOpenCodeTuiRegistration(content: string): boolean {
+  const config = parseOpenCodeConfig(content);
+  const plugin = Array.isArray(config.plugin) ? config.plugin : [];
+  return plugin.some(isSupermemoryPluginEntry);
+}
+
 type JsonObject = Record<string, unknown>;
 
 function isObject(value: unknown): value is JsonObject {

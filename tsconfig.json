@@ -6,6 +6,8 @@
     "module": "ESNext",
     "moduleDetection": "force",
     "allowJs": true,
+    "jsx": "react-jsx",
+    "jsxImportSource": "@opentui/solid",
 
     // Bundler mode
     "moduleResolution": "bundler",
