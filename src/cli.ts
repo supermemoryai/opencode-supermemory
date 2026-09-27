@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import * as readline from "node:readline";
 import { startAuthFlow, clearCredentials, loadCredentials, CREDENTIALS_FILE } from "./services/auth.js";
-import { CONFIG, CONFIG_FILE, SUPERMEMORY_API_KEY, getApiBaseUrl, isConfigured, writeInstallDefaults } from "./config.js";
+import { CONFIG, CONFIG_DIR, SUPERMEMORY_API_KEY, getApiBaseUrl, getConfigFilePath, isConfigured, readConfigFile } from "./config.js";
+import { writeInstallDefaults } from "./services/install-defaults.js";
 import { SupermemoryClient } from "./services/client.js";
 import { getTags } from "./services/tags.js";
 import {
@@ -16,7 +17,7 @@ import {
   V2_PLUGIN_ENTRY,
 } from "./services/opencode-config.js";
 
-const OPENCODE_CONFIG_DIR = join(homedir(), ".config", "opencode");
+const OPENCODE_CONFIG_DIR = CONFIG_DIR;
 const OPENCODE_COMMAND_DIRS = [
   join(OPENCODE_CONFIG_DIR, "commands"),
   join(OPENCODE_CONFIG_DIR, "command"),
@@ -26,7 +27,6 @@ const OPENCODE_TUI_CONFIGS = [
   join(OPENCODE_CONFIG_DIR, "tui.json"),
 ];
 const OH_MY_OPENCODE_CONFIG = join(OPENCODE_CONFIG_DIR, "oh-my-opencode.json");
-const DEFAULT_CONFIG_FILE = CONFIG_FILE ?? join(OPENCODE_CONFIG_DIR, "supermemory.json");
 
 const SUPERMEMORY_INDEX_COMMAND = `---
 description: Index this codebase into Supermemory
@@ -209,7 +209,7 @@ bunx opencode-supermemory@latest login
 \`\`\`
 
 This will:
-1. Start a local server on port 19877
+1. Start a local callback server on a free port
 2. Open the browser to Supermemory's authentication page
 3. After the user logs in, save credentials to ~/.supermemory-opencode/credentials.json
 
@@ -416,7 +416,12 @@ interface InstallOptions {
 async function install(options: InstallOptions): Promise<number> {
   console.log("\n🧠 opencode-supermemory installer\n");
 
-  writeInstallDefaults(existsSync(DEFAULT_CONFIG_FILE));
+  try {
+    const defaults = writeInstallDefaults(OPENCODE_CONFIG_DIR);
+    if (defaults.changed) console.log(`✓ Wrote Supermemory defaults to ${defaults.path}`);
+  } catch (err) {
+    console.error("✗ Failed to update the Supermemory config:", err);
+  }
 
   const rl = options.tui ? createReadline() : null;
 
@@ -532,19 +537,10 @@ function maskKey(key: string | undefined): string {
   return `${key.slice(0, 6)}...${key.slice(-4)}`;
 }
 
-function getConfiguredApiKeyFromFile(): string | undefined {
-  try {
-    if (!existsSync(DEFAULT_CONFIG_FILE)) return undefined;
-    const parsed = JSON.parse(readFileSync(DEFAULT_CONFIG_FILE, "utf-8")) as { apiKey?: string };
-    return parsed.apiKey;
-  } catch {
-    return undefined;
-  }
-}
-
 function getKeySource(): string {
   if (process.env.SUPERMEMORY_API_KEY) return "SUPERMEMORY_API_KEY env var";
-  if (getConfiguredApiKeyFromFile()) return DEFAULT_CONFIG_FILE;
+  const configPath = getConfigFilePath();
+  if (configPath && readConfigFile(configPath)?.apiKey) return configPath;
   if (loadCredentials()) return CREDENTIALS_FILE;
   return "not configured";
 }
@@ -631,6 +627,7 @@ async function status(): Promise<number> {
   lines.push(`Connected: ${isConfigured() ? "checking..." : "no"}`);
   lines.push(`API key: ${maskKey(SUPERMEMORY_API_KEY)} (${getKeySource()})`);
   lines.push(`API URL: ${apiUrl}`);
+  lines.push(`Config file: ${getConfigFilePath() ?? `none (defaults; create ${join(OPENCODE_CONFIG_DIR, "supermemory.jsonc")})`}`);
   lines.push("Memory scope: unified project container with personal/project metadata");
   lines.push(`Recall mode: ${CONFIG.recallMode}`);
   lines.push(`Recall directive: ${CONFIG.recallMode === "advisory" && CONFIG.recallDirective ? "custom" : "default"}`);

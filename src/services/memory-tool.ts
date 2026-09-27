@@ -95,8 +95,8 @@ export async function executeSupermemoryTool(
             },
             {
               command: "search",
-              description: "Search memories",
-              args: ["query", "scope?"],
+              description: "Search memories (both scopes unless scope is given)",
+              args: ["query", "scope?", "limit?"],
             },
             {
               command: "profile",

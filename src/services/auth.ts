@@ -5,6 +5,7 @@ import { arch, homedir, hostname, platform } from "node:os";
 import { randomBytes } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { openUrl } from "./openUrl.js";
+import { PLUGIN_VERSION } from "../version.js";
 
 const CREDENTIALS_DIR = join(homedir(), ".supermemory-opencode");
 export const CREDENTIALS_FILE = join(CREDENTIALS_DIR, "credentials.json");
@@ -162,7 +163,7 @@ export function startAuthFlow(timeoutMs = AUTH_TIMEOUT): Promise<AuthResult> {
         hostname: `opencode - ${hostname()}`,
         os: `${platform()}-${arch()}`,
         cwd: process.cwd(),
-        cli_version: "2.0.10",
+        cli_version: PLUGIN_VERSION,
       });
       const authUrl = `${AUTH_BASE_URL}?${params.toString()}`;
 

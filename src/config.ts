@@ -1,10 +1,10 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { stripJsoncComments } from "./services/jsonc.js";
 import { loadCredentials } from "./services/auth.js";
 
-const CONFIG_DIR = join(homedir(), ".config", "opencode");
+export const CONFIG_DIR = join(homedir(), ".config", "opencode");
 export { PLUGIN_VERSION } from "./version.js";
 const CONFIG_FILES = [
   join(CONFIG_DIR, "supermemory.jsonc"),
@@ -118,19 +118,24 @@ function resolveRecallMode(): RecallMode {
   return DEFAULTS.recallMode;
 }
 
-function loadRawConfig(): { config: SupermemoryConfig; existed: boolean } {
-  for (const path of CONFIG_FILES) {
-    if (existsSync(path)) {
-      try {
-        const content = readFileSync(path, "utf-8");
-        const json = stripJsoncComments(content);
-        return { config: JSON.parse(json) as SupermemoryConfig, existed: true };
-      } catch {
-        return { config: {}, existed: true };
-      }
-    }
+/** The config file the plugin reads: `supermemory.jsonc` wins over `supermemory.json`. */
+export function getConfigFilePath(): string | undefined {
+  return CONFIG_FILES.find((path) => existsSync(path));
+}
+
+/** Parses a Supermemory config file (JSON or JSONC). Returns undefined when unreadable. */
+export function readConfigFile(path: string): SupermemoryConfig | undefined {
+  try {
+    return JSON.parse(stripJsoncComments(readFileSync(path, "utf-8"))) as SupermemoryConfig;
+  } catch {
+    return undefined;
   }
-  return { config: {}, existed: false };
+}
+
+function loadRawConfig(): { config: SupermemoryConfig; existed: boolean } {
+  const path = getConfigFilePath();
+  if (!path) return { config: {}, existed: false };
+  return { config: readConfigFile(path) ?? {}, existed: true };
 }
 
 const { config: fileConfig, existed: configExisted } = loadRawConfig();
@@ -171,9 +176,6 @@ export function getApiBaseUrl(): string {
   }
   return normalized;
 }
-
-export const CONFIG_FILE = CONFIG_FILES[1];
-const DEFAULT_CONFIG_FILE = CONFIG_FILE ?? join(CONFIG_DIR, "supermemory.json");
 
 export const CONFIG = {
   similarityThreshold: fileConfig.similarityThreshold ?? DEFAULTS.similarityThreshold,
@@ -217,16 +219,4 @@ export function getRecallConfig(): {
     directive: CONFIG.recallDirective ?? null,
     mode: CONFIG.recallMode,
   };
-}
-
-export function writeInstallDefaults(isExistingInstall: boolean): void {
-  const current = loadRawConfig().config;
-  const next: SupermemoryConfig = { ...current };
-  if (isExistingInstall) {
-    if (next.captureEveryNTurns === undefined) next.captureEveryNTurns = 3;
-  } else {
-    next.recallMode = "direct";
-    next.captureEveryNTurns = 0;
-  }
-  writeFileSync(DEFAULT_CONFIG_FILE, JSON.stringify(next, null, 2));
 }
