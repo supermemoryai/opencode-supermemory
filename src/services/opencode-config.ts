@@ -206,3 +206,28 @@ export function editOpenCodeConfig(rawContent: string): OpenCodeConfigEditResult
     warnings,
   };
 }
+
+/**
+ * Adds installer defaults to supermemory.json(c) without rewriting the rest of
+ * the file, so user comments survive. Returns null for content that is not a
+ * valid JSONC object, which should be left for the user to fix.
+ */
+export function applyInstallDefaults(rawContent: string, isExistingInstall: boolean): string | null {
+  const content = rawContent.trim() === "" ? "{}\n" : rawContent;
+  let config: JsonObject;
+  try {
+    config = parseOpenCodeConfig(content);
+  } catch {
+    return null;
+  }
+
+  const defaults: JsonObject = isExistingInstall
+    ? config.captureEveryNTurns === undefined ? { captureEveryNTurns: 3 } : {}
+    : { recallMode: "direct", captureEveryNTurns: 0 };
+
+  let next = content;
+  for (const [key, value] of Object.entries(defaults)) {
+    next = applyModification(next, [key], value);
+  }
+  return next;
+}

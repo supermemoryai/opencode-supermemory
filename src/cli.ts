@@ -4,10 +4,12 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import * as readline from "node:readline";
 import { startAuthFlow, clearCredentials, loadCredentials, CREDENTIALS_FILE } from "./services/auth.js";
-import { CONFIG, CONFIG_FILE, SUPERMEMORY_API_KEY, getApiBaseUrl, isConfigured, writeInstallDefaults } from "./config.js";
+import { CONFIG, CONFIG_FILE, SUPERMEMORY_API_KEY, getApiBaseUrl, isConfigured } from "./config.js";
 import { SupermemoryClient } from "./services/client.js";
 import { getTags } from "./services/tags.js";
+import { stripJsoncComments } from "./services/jsonc.js";
 import {
+  applyInstallDefaults,
   editOpenCodeConfig,
   editOpenCodeTuiConfig,
   readOpenCodeRegistration,
@@ -408,6 +410,16 @@ function disableAutoCompactHook(): boolean {
   }
 }
 
+function writeInstallDefaults(isExistingInstall: boolean): void {
+  const raw = isExistingInstall ? readFileSync(DEFAULT_CONFIG_FILE, "utf-8") : "";
+  const next = applyInstallDefaults(raw, isExistingInstall);
+  if (next === null) {
+    console.warn(`⚠ Could not parse ${DEFAULT_CONFIG_FILE}; left it unchanged.`);
+  } else if (next !== raw) {
+    writeFileSync(DEFAULT_CONFIG_FILE, next);
+  }
+}
+
 interface InstallOptions {
   tui: boolean;
   disableAutoCompact: boolean;
@@ -535,7 +547,7 @@ function maskKey(key: string | undefined): string {
 function getConfiguredApiKeyFromFile(): string | undefined {
   try {
     if (!existsSync(DEFAULT_CONFIG_FILE)) return undefined;
-    const parsed = JSON.parse(readFileSync(DEFAULT_CONFIG_FILE, "utf-8")) as { apiKey?: string };
+    const parsed = JSON.parse(stripJsoncComments(readFileSync(DEFAULT_CONFIG_FILE, "utf-8"))) as { apiKey?: string };
     return parsed.apiKey;
   } catch {
     return undefined;

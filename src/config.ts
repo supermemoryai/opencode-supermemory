@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { stripJsoncComments } from "./services/jsonc.js";
@@ -118,22 +118,22 @@ function resolveRecallMode(): RecallMode {
   return DEFAULTS.recallMode;
 }
 
-function loadRawConfig(): { config: SupermemoryConfig; existed: boolean } {
+function loadRawConfig(): { config: SupermemoryConfig; existed: boolean; path?: string } {
   for (const path of CONFIG_FILES) {
     if (existsSync(path)) {
       try {
         const content = readFileSync(path, "utf-8");
         const json = stripJsoncComments(content);
-        return { config: JSON.parse(json) as SupermemoryConfig, existed: true };
+        return { config: JSON.parse(json) as SupermemoryConfig, existed: true, path };
       } catch {
-        return { config: {}, existed: true };
+        return { config: {}, existed: true, path };
       }
     }
   }
   return { config: {}, existed: false };
 }
 
-const { config: fileConfig, existed: configExisted } = loadRawConfig();
+const { config: fileConfig, existed: configExisted, path: loadedConfigFile } = loadRawConfig();
 
 function getApiKey(): string | undefined {
   if (process.env.SUPERMEMORY_API_KEY) return process.env.SUPERMEMORY_API_KEY;
@@ -172,8 +172,8 @@ export function getApiBaseUrl(): string {
   return normalized;
 }
 
-export const CONFIG_FILE = CONFIG_FILES[1];
-const DEFAULT_CONFIG_FILE = CONFIG_FILE ?? join(CONFIG_DIR, "supermemory.json");
+/** The file the config was loaded from, or where a new one should be created. */
+export const CONFIG_FILE = loadedConfigFile ?? CONFIG_FILES[1];
 
 export const CONFIG = {
   similarityThreshold: fileConfig.similarityThreshold ?? DEFAULTS.similarityThreshold,
@@ -217,16 +217,4 @@ export function getRecallConfig(): {
     directive: CONFIG.recallDirective ?? null,
     mode: CONFIG.recallMode,
   };
-}
-
-export function writeInstallDefaults(isExistingInstall: boolean): void {
-  const current = loadRawConfig().config;
-  const next: SupermemoryConfig = { ...current };
-  if (isExistingInstall) {
-    if (next.captureEveryNTurns === undefined) next.captureEveryNTurns = 3;
-  } else {
-    next.recallMode = "direct";
-    next.captureEveryNTurns = 0;
-  }
-  writeFileSync(DEFAULT_CONFIG_FILE, JSON.stringify(next, null, 2));
 }
