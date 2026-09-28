@@ -39,9 +39,10 @@ bunx opencode-supermemory@latest status    # check the connection any time
 Install opencode-supermemory by following https://raw.githubusercontent.com/supermemoryai/opencode-supermemory/main/README.md
 ```
 
-`install`, `login`, `logout`, and `status` are also available as in-chat commands
-(`/supermemory-init`, `/supermemory-login`, `/supermemory-logout`, `/supermemory-status`)
-once the plugin is registered.
+`login`, `logout`, and `status` are also available as in-chat commands
+(`/supermemory-login`, `/supermemory-logout`, `/supermemory-status`) once the plugin is
+registered, along with `/supermemory-index` (alias `/supermemory-init`) for
+[codebase indexing](#codebase-indexing).
 
 <details>
 <summary>Instructions for LLM agents</summary>
@@ -55,15 +56,16 @@ If you're an LLM agent helping set up opencode-supermemory, follow these steps:
 bunx opencode-supermemory@latest install --no-tui
 ```
 
-This registers the plugin in `~/.config/opencode/opencode.jsonc` for both OpenCode V1
-and OpenCode 2, and creates the `/supermemory-index` command. Add
-`--disable-context-recovery` if the user also has
+Add `--disable-context-recovery` if the user also has
 [Oh My OpenCode](#usage-with-oh-my-opencode) installed, to avoid its auto-compact hook
-fighting with this plugin's V1 compaction.
+fighting with this plugin's V1 compaction. The installer:
 
-- Register the plugin in `~/.config/opencode/opencode.jsonc` (`plugin` for V1, `plugins`
+- Registers the plugin in `~/.config/opencode/opencode.jsonc` (`plugin` for V1, `plugins`
   for OpenCode 2, plus an `allow` rule for the read-only `supermemory_recall` tool)
-- Create the `/supermemory-index` command (`/supermemory-init` is an alias)
+- Enables the V1 status footer in `~/.config/opencode/tui.jsonc`
+- Creates the `/supermemory-index` (alias `/supermemory-init`), `/supermemory-login`,
+  `/supermemory-logout`, and `/supermemory-status` commands
+- Writes default settings to the Supermemory config file
 
 #### Step 2: Verify the config
 
@@ -125,24 +127,35 @@ Run `/supermemory-index` to have the agent explore and memorize the codebase. `/
 
 |  |  |
 | --- | --- |
-| 🧠 **Context injection**<br>On a session's first message, the agent silently receives your profile, all project knowledge, and (if `autoRecallEveryPrompt` is on) a semantic search over personal memories. | 🔎 **Reasoned recall**<br>Every turn, the agent is shown a directive asking it to decide whether recalling memory would help before answering. It searches via the `supermemory` tool only when it decides to; the search itself is auto-approved. |
+| 🧠 **Profile injection**<br>On a session's first message, the agent silently receives your Supermemory profile: stable facts and recent context, up to `maxProfileItems` each. | 🔎 **Direct recall**<br>On every substantive prompt, Supermemory searches this repository's memories and injects up to five relevant matches not already shown in the session. Set `recallMode: "advisory"` to let the agent decide when to search instead. |
 | 💾 **Automatic capture**<br>Completed turns are saved every `captureEveryNTurns` turns, with any remainder flushed when the session ends or OpenCode shuts down. Synthetic plugin context is excluded and `<private>` content is redacted. | 🗣️ **Keyword detection**<br>Saying "remember", "save this", "don't forget", or a custom pattern nudges the agent to save to memory. |
 | 🧭 **Codebase indexing**<br>`/supermemory-init` has the agent explore and memorize the codebase's structure, patterns, and conventions. | 🗜️ **Compaction memory**<br>On OpenCode V1, triggers summarization at 80% context capacity. On OpenCode 2, enriches the native compaction request. Both inject project memories into the summary and save the summary itself as a memory. |
 | 🔒 **Privacy**<br>Content wrapped in `<private>...</private>` is never stored. | 🔔 **Update notices**<br>Checks npm for a newer release on session start and surfaces a one-line notice. |
 
+On the first message:
+
 ```
 [SUPERMEMORY]
+Every line marked ◪ comes from supermemory. When one shapes your answer, credit it naturally with the ◪ prefix; if you name the source, say "from supermemory".
 
 User Profile:
-- Prefers concise responses
-- Expert in TypeScript
+- ◪ Prefers concise responses
+- ◪ Expert in TypeScript
 
-Project Knowledge:
-- [100%] Uses Bun, not Node.js
-- [100%] Build: bun run build
+Recent Context:
+- ◪ Migrating the test suite to bun test
+```
 
-Relevant Memories:
-- [82%] Build fails if .env.local missing
+On each substantive prompt (direct recall):
+
+```
+<supermemory-context>
+Relevant memories automatically recalled for this prompt. Every line marked ◪ comes from supermemory:
+- ◪ Uses Bun, not Node.js
+- ◪ Build fails if .env.local is missing
+When one shapes your answer, credit it naturally with the ◪ prefix; if you name the source, say "from supermemory".
+Use these memories only when relevant. Search Supermemory for deeper context if needed.
+</supermemory-context>
 ```
 
 The agent uses this context automatically - no manual prompting needed.
@@ -156,8 +169,8 @@ three seconds so it never blocks the agent indefinitely.
 
 Set `recallMode` to `"advisory"` to retain model-decided tool recall, or to
 `"off"` to disable automatic recall. `recallDirective` customizes advisory mode.
-Legacy `autoRecallEveryPrompt: true` maps to direct mode and `false` maps to
-advisory mode when `recallMode` is unset.
+When `recallMode` is unset, setting `recallDirective` selects advisory mode, and legacy
+`autoRecallEveryPrompt: true` maps to direct mode and `false` to advisory mode.
 
 ### Automatic Capture
 
@@ -259,13 +272,14 @@ The `supermemory` tool is available to the agent:
 | Mode | Args | Description |
 | --- | --- | --- |
 | `add` | `content`, `type?`, `scope?` | Store memory |
-| `search` | `query`, `scope?` | Search memories |
+| `search` | `query`, `scope?`, `limit?` | Search memories |
 | `profile` | `query?` | View user profile |
-| `list` | `scope?`, `limit?` | List memories |
+| `list` | `scope?`, `limit?` | List memories (default 20) |
 | `forget` | `memoryId`, `scope?` | Delete memory |
 | `help` | none | List available modes |
 
-**Scopes:** `user` (personal memories for the current project), `project` (default)
+**Scopes:** `user` (personal memories for the current project) or `project`. `add`, `list`,
+and `forget` default to `project`; `search` without a scope searches both.
 
 **Types:** `project-config`, `architecture`, `error-solution`, `preference`, `learned-pattern`, `conversation`
 
@@ -300,9 +314,9 @@ does not require a migration.
 | `SUPERMEMORY_API_URL` / `SUPERMEMORY_BASE_URL` | Override the Supermemory API base URL. |
 | `SUPERMEMORY_AUTH_URL` | Override the browser-auth base URL. |
 | `SUPERMEMORY_AUTH_TIMEOUT` | Browser-auth timeout in milliseconds (default 5 minutes). |
-| `SUPERMEMORY_REPO_TAG` | Explicit project-container override, checked before the config value. |
+| `SUPERMEMORY_REPO_TAG` | Explicit project-container override. See [Container tag selection](#container-tag-selection) for precedence. |
 | `SUPERMEMORY_ISOLATE_WORKTREES` | Set to `true` to key the project container on the worktree path instead of the Git remote. |
-| `SUPERMEMORY_DEBUG` | Set to show `[recall-decision]` lines and enable debug logging. |
+| `SUPERMEMORY_DEBUG` | In advisory mode, asks the agent to start each reply with a `[recall-decision]` line. Logs are always written to `~/.opencode-supermemory.log`. |
 
 ### `~/.config/opencode/supermemory.jsonc`
 
@@ -317,10 +331,10 @@ does not require a migration.
   // Min similarity for memory retrieval (0-1)
   "similarityThreshold": 0.55,
 
-  // Max memories injected per request
+  // Max results per memory search (direct recall injects at most 5)
   "maxMemories": 5,
 
-  // Max project memories listed
+  // Max project memories added to compaction summaries
   "maxProjectMemories": 10,
 
   // Max profile facts injected
@@ -329,10 +343,8 @@ does not require a migration.
   // Include user profile in context
   "injectProfile": true,
 
-  // Also run a semantic search over personal memories on a session's first
-  // message, not just profile + project list (default: true on upgrades,
-  // false on fresh installs)
-  "autoRecallEveryPrompt": true,
+  // Legacy: only used when recallMode is unset (true = "direct", false = "advisory")
+  // "autoRecallEveryPrompt": true,
 
   // Legacy prefix retained when reading containers made by older versions
   "containerTagPrefix": "opencode",
@@ -343,6 +355,10 @@ does not require a migration.
   // Optional: set exact project container tag (overrides auto-generated tag)
   "projectContainerTag": "my-project-tag",
 
+  // Prompt for Supermemory's LLM memory filter. When it connects, the plugin enables
+  // filtering and applies this prompt to your Supermemory settings.
+  "filterPrompt": "Remember the user's coding preferences, tech stack, and workflows.",
+
   // Extra keyword patterns for memory detection (regex)
   "keywordPatterns": ["log\\s+this", "write\\s+down"],
 
@@ -352,10 +368,11 @@ does not require a migration.
   // OpenCode 2: enrich native compaction with project memories and save summaries
   "compactionEnabled": true,
 
-  // Save completed conversation batches every N turns (0 = session end only)
+  // Save completed conversation batches every N turns (0 = session end only).
+  // Default: 0 on fresh installs, 3 if the config file exists but omits this key.
   "captureEveryNTurns": 3,
 
-  // "direct" (default for new installs), "advisory", or "off"
+  // "direct" (default), "advisory", or "off"
   "recallMode": "direct",
 
   // Override the directive used in advisory mode
@@ -374,7 +391,18 @@ By default, new writes use:
 
 Older `{prefix}_user_*` and `{prefix}_project_*` containers remain readable.
 `userContainerTag` is treated as a legacy personal read. You can still override the
-unified write container with `projectContainerTag`:
+unified write container with `projectContainerTag`, but other sources take precedence.
+The first one set wins:
+
+1. `repoContainerTag` in `<repo>/.claude/.supermemory-claude/config.json` (shared with Claude Code)
+2. `SUPERMEMORY_REPO_TAG`
+3. `repoContainerTag` in the legacy Cursor config (`.cursor/.supermemory/config.json` in
+   the project, or `~/.config/cursor/supermemory.json`)
+4. `projectContainerTag` in the Supermemory config file
+5. `projectContainerTag` in `~/.codex/supermemory.json` (shared with Codex)
+6. The generated repository tag
+
+For example:
 
 ```jsonc
 {
