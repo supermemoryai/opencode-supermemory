@@ -125,6 +125,11 @@ interface FakeTool {
   execute: (input: unknown, context: unknown) => Promise<{ content?: unknown }>;
 }
 
+interface FakeRegistration {
+  disposeCalls: number;
+  dispose: () => Promise<void>;
+}
+
 interface Harness {
   ctx: V2Context;
   runtime: V2Runtime;
@@ -142,6 +147,7 @@ interface HarnessEnvironment {
   deps: Partial<V2RuntimeDependencies>;
   tools: Map<string, FakeTool>;
   hooks: Harness["hooks"];
+  registrations: FakeRegistration[];
   queries: string[];
   writes: Harness["writes"];
   adds: Harness["adds"];
@@ -160,14 +166,38 @@ function environment(
   const adds: Harness["adds"] = [];
   const emitted: Harness["emitted"] = [];
   const state: { transcript: TranscriptMessage[] } = { transcript: [] };
-  const registration = { dispose: async () => undefined };
+  const registrations: FakeRegistration[] = [];
+
+  const registration = (remove: () => void = () => undefined) => {
+    let disposed = false;
+    const handle: FakeRegistration = {
+      disposeCalls: 0,
+      dispose: async () => {
+        handle.disposeCalls++;
+        if (disposed) return;
+        disposed = true;
+        remove();
+      },
+    };
+    registrations.push(handle);
+    return handle;
+  };
+
+  const hook = (name: string, callback: Harness["hooks"][string]) => {
+    hooks[name] = callback;
+    return registration(() => {
+      if (hooks[name] === callback) delete hooks[name];
+    });
+  };
 
   const ctx = {
     location: { directory },
     tool: {
       transform: async (callback: (editor: unknown) => void) => {
+        const added: FakeTool[] = [];
         callback({
           add: (tool: FakeTool) => {
+            added.push(tool);
             tools.set(tool.name, tool);
           },
           list: () => [],
@@ -176,20 +206,20 @@ function environment(
           update: () => undefined,
           remove: () => undefined,
         });
-        return registration;
+        return registration(() => {
+          for (const tool of added) {
+            if (tools.get(tool.name) === tool) tools.delete(tool.name);
+          }
+        });
       },
-      hook: async (name: string, callback: Harness["hooks"][string]) => {
-        hooks[`tool.${name}`] = callback;
-        return registration;
-      },
+      hook: async (name: string, callback: Harness["hooks"][string]) =>
+        hook(`tool.${name}`, callback),
       reload: async () => undefined,
       list: async () => [],
     },
     session: {
-      hook: async (name: string, callback: Harness["hooks"][string]) => {
-        hooks[`session.${name}`] = callback;
-        return registration;
-      },
+      hook: async (name: string, callback: Harness["hooks"][string]) =>
+        hook(`session.${name}`, callback),
       get: async ({ sessionID }: { sessionID: string }) => ({
         id: sessionID,
         location: { directory },
@@ -197,14 +227,11 @@ function environment(
       context: async () => state.transcript,
     },
     permission: {
-      hook: async (name: string, callback: Harness["hooks"][string]) => {
-        hooks[`permission.${name}`] = callback;
-        return registration;
-      },
+      hook: async (name: string, callback: Harness["hooks"][string]) =>
+        hook(`permission.${name}`, callback),
     },
     rpc: {
-      register: async () => ({
-        ...registration,
+      register: async () => Object.assign(registration(), {
         events: {
           emit: async (_name: string, data: Record<string, unknown>) => {
             emitted.push(data);
@@ -291,6 +318,7 @@ function environment(
     deps,
     tools,
     hooks,
+    registrations,
     queries,
     writes,
     adds,
@@ -509,7 +537,69 @@ async function recallAllowed(env: HarnessEnvironment): Promise<boolean> {
   return evaluation.effect === "allow";
 }
 
+function expectDisposalCalls(registrations: FakeRegistration[], count: number): void {
+  expect(registrations).toHaveLength(7);
+  expect(registrations.map((registration) => registration.disposeCalls)).toEqual(
+    Array(7).fill(count),
+  );
+}
+
+function expectRegistry(env: HarnessEnvironment, registered: boolean): void {
+  expect([...env.tools.keys()].sort()).toEqual(registered ? [
+    SUPERMEMORY_TOOL_NAME,
+    SUPERMEMORY_RECALL_TOOL_NAME,
+  ].sort() : []);
+  expect(Object.keys(env.hooks).sort()).toEqual(registered ? [
+    "permission.evaluate",
+    "session.compaction",
+    "session.context",
+    "tool.execute.after",
+    "tool.execute.before",
+  ] : []);
+  expectDisposalCalls(env.registrations, registered ? 0 : 1);
+}
+
 describe("OpenCode 2 setup ownership", () => {
+  test("fixture disposal is identity-aware and idempotent", async () => {
+    const env = environment({}, "/repo/fixture");
+    const original = new V2Runtime(env.ctx, env.deps);
+    const replacement = new V2Runtime(env.ctx, env.deps);
+    await original.register();
+    const originalRegistrations = env.registrations.slice();
+    await replacement.register();
+    const replacementRegistrations = env.registrations.slice(originalRegistrations.length);
+    const replacementTools = new Map(env.tools);
+    const replacementHooks = { ...env.hooks };
+
+    try {
+      original.cleanup();
+      expectDisposalCalls(originalRegistrations, 1);
+      expectDisposalCalls(replacementRegistrations, 0);
+      expect(env.tools).toEqual(replacementTools);
+      expect(env.hooks).toEqual(replacementHooks);
+      expect(await recallText(env)).toContain('"success":true');
+      expect(await recallAllowed(env)).toBe(true);
+
+      for (const registration of originalRegistrations) await registration.dispose();
+      expectDisposalCalls(originalRegistrations, 2);
+      expectDisposalCalls(replacementRegistrations, 0);
+      expect(env.tools).toEqual(replacementTools);
+      expect(env.hooks).toEqual(replacementHooks);
+
+      replacement.cleanup();
+      expectDisposalCalls(replacementRegistrations, 1);
+      expect(env.tools.size).toBe(0);
+      expect(Object.keys(env.hooks)).toEqual([]);
+      for (const registration of replacementRegistrations) await registration.dispose();
+      expectDisposalCalls(replacementRegistrations, 2);
+      expect(env.tools.size).toBe(0);
+      expect(Object.keys(env.hooks)).toEqual([]);
+    } finally {
+      original.cleanup();
+      replacement.cleanup();
+    }
+  });
+
   test("keeps two different locations registered and usable", async () => {
     const first = environment({}, "/repo/one");
     const second = environment({}, "/repo/two");
@@ -517,26 +607,33 @@ describe("OpenCode 2 setup ownership", () => {
     const cleanupFirst = await setupV2(first.ctx, first.deps);
     const cleanupSecond = await setupV2(second.ctx, second.deps);
 
-    const expectedTools = [
-      SUPERMEMORY_TOOL_NAME,
-      SUPERMEMORY_RECALL_TOOL_NAME,
-    ].sort();
-    expect([...first.tools.keys()].sort()).toEqual(expectedTools);
-    expect([...second.tools.keys()].sort()).toEqual(expectedTools);
+    const firstTools = new Map(first.tools);
+    const firstHooks = { ...first.hooks };
+    try {
+      expectRegistry(first, true);
+      expectRegistry(second, true);
+      expect(await recallText(first)).toContain('"success":true');
+      expect(await recallText(second)).toContain('"success":true');
+      expect(await recallAllowed(first)).toBe(true);
+      expect(await recallAllowed(second)).toBe(true);
 
-    expect(await recallText(first)).toContain('"success":true');
-    expect(await recallText(second)).toContain('"success":true');
-    expect(await recallAllowed(first)).toBe(true);
-    expect(await recallAllowed(second)).toBe(true);
+      cleanupSecond();
+      cleanupSecond();
+      expectRegistry(second, false);
+      expectRegistry(first, true);
+      expect(first.tools).toEqual(firstTools);
+      expect(first.hooks).toEqual(firstHooks);
+      expect(await recallText(first)).toContain('"success":true');
+      expect(await recallAllowed(first)).toBe(true);
 
-    cleanupSecond();
-    expect(await recallText(first)).toContain('"success":true');
-    expect(await recallText(second)).toContain('"success":false');
-    expect(await recallAllowed(first)).toBe(true);
-    expect(await recallAllowed(second)).toBe(false);
-
-    cleanupFirst();
-    expect(await recallAllowed(first)).toBe(false);
+      cleanupFirst();
+      cleanupFirst();
+      expectRegistry(first, false);
+      expectRegistry(second, false);
+    } finally {
+      cleanupFirst();
+      cleanupSecond();
+    }
   });
 
   test("replaces only the same directory and ignores stale cleanup", async () => {
@@ -547,29 +644,62 @@ describe("OpenCode 2 setup ownership", () => {
 
     const cleanupOriginal = await setupV2(original.ctx, original.deps);
     const cleanupOther = await setupV2(other.ctx, other.deps);
-    const cleanupReplacement = await setupV2(replacement.ctx, replacement.deps);
+    let cleanupReplacement: () => void = () => undefined;
+    const otherTools = new Map(other.tools);
+    const otherHooks = { ...other.hooks };
+    try {
+      expectRegistry(original, true);
+      expectRegistry(other, true);
+      const originalRecall = original.tools.get(SUPERMEMORY_RECALL_TOOL_NAME)!;
+      const originalEvaluate = original.hooks["permission.evaluate"]!;
 
-    expect(await recallText(original)).toContain('"success":false');
-    expect(await recallText(replacement)).toContain('"success":true');
-    expect(await recallText(other)).toContain('"success":true');
-    expect(await recallAllowed(original)).toBe(false);
-    expect(await recallAllowed(replacement)).toBe(true);
-    expect(await recallAllowed(other)).toBe(true);
+      cleanupReplacement = await setupV2(replacement.ctx, replacement.deps);
+      const replacementTools = new Map(replacement.tools);
+      const replacementHooks = { ...replacement.hooks };
+      expectRegistry(original, false);
+      expectRegistry(replacement, true);
+      expectRegistry(other, true);
+      expect(String((await originalRecall.execute({ query: "bun" }, { sessionID: "s1" })).content))
+        .toContain('"success":false');
+      const evaluation = { action: SUPERMEMORY_RECALL_TOOL_NAME, effect: "ask" };
+      await originalEvaluate(evaluation);
+      expect(evaluation.effect).toBe("ask");
+      expect(await recallText(replacement)).toContain('"success":true');
+      expect(await recallText(other)).toContain('"success":true');
+      expect(await recallAllowed(replacement)).toBe(true);
+      expect(await recallAllowed(other)).toBe(true);
 
-    cleanupOriginal();
-    cleanupOriginal();
-    expect(await recallText(replacement)).toContain('"success":true');
-    expect(await recallText(other)).toContain('"success":true');
-    expect(await recallAllowed(replacement)).toBe(true);
-    expect(await recallAllowed(other)).toBe(true);
+      cleanupOriginal();
+      cleanupOriginal();
+      expectRegistry(original, false);
+      expectRegistry(replacement, true);
+      expectRegistry(other, true);
+      expect(replacement.tools).toEqual(replacementTools);
+      expect(replacement.hooks).toEqual(replacementHooks);
+      expect(other.tools).toEqual(otherTools);
+      expect(other.hooks).toEqual(otherHooks);
+      expect(await recallText(replacement)).toContain('"success":true');
+      expect(await recallText(other)).toContain('"success":true');
+      expect(await recallAllowed(replacement)).toBe(true);
+      expect(await recallAllowed(other)).toBe(true);
 
-    cleanupReplacement();
-    expect(await recallText(replacement)).toContain('"success":false');
-    expect(await recallText(other)).toContain('"success":true');
-    expect(await recallAllowed(replacement)).toBe(false);
-    expect(await recallAllowed(other)).toBe(true);
+      cleanupReplacement();
+      cleanupReplacement();
+      expectRegistry(replacement, false);
+      expectRegistry(other, true);
+      expect(other.tools).toEqual(otherTools);
+      expect(other.hooks).toEqual(otherHooks);
+      expect(await recallText(other)).toContain('"success":true');
+      expect(await recallAllowed(other)).toBe(true);
 
-    cleanupOther();
+      cleanupOther();
+      cleanupOther();
+      expectRegistry(other, false);
+    } finally {
+      cleanupOriginal();
+      cleanupReplacement();
+      cleanupOther();
+    }
   });
 
   test("tearing down one directory leaves the other registered", async () => {
@@ -579,11 +709,26 @@ describe("OpenCode 2 setup ownership", () => {
     const cleanupLeft = await setupV2(left.ctx, left.deps);
     const cleanupRight = await setupV2(right.ctx, right.deps);
 
-    cleanupLeft();
-    expect(await recallText(left)).toContain('"success":false');
-    expect(await recallText(right)).toContain('"success":true');
+    const rightTools = new Map(right.tools);
+    const rightHooks = { ...right.hooks };
+    try {
+      expectRegistry(left, true);
+      expectRegistry(right, true);
+      cleanupLeft();
+      cleanupLeft();
+      expectRegistry(left, false);
+      expectRegistry(right, true);
+      expect(right.tools).toEqual(rightTools);
+      expect(right.hooks).toEqual(rightHooks);
+      expect(await recallText(right)).toContain('"success":true');
+      expect(await recallAllowed(right)).toBe(true);
 
-    cleanupRight();
-    expect(await recallText(right)).toContain('"success":false');
+      cleanupRight();
+      cleanupRight();
+      expectRegistry(right, false);
+    } finally {
+      cleanupLeft();
+      cleanupRight();
+    }
   });
 });
