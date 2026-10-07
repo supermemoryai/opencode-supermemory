@@ -9,6 +9,7 @@ import {
   buildTranscriptTurns,
   buildV2RecallDirective,
   mergeTurns,
+  setupV2,
   SUPERMEMORY_RECALL_TOOL_NAME,
   SUPERMEMORY_TOOL_NAME,
   V2Runtime,
@@ -136,9 +137,22 @@ interface Harness {
   transcript: TranscriptMessage[];
 }
 
-function harness(
+interface HarnessEnvironment {
+  ctx: V2Context;
+  deps: Partial<V2RuntimeDependencies>;
+  tools: Map<string, FakeTool>;
+  hooks: Harness["hooks"];
+  queries: string[];
+  writes: Harness["writes"];
+  adds: Harness["adds"];
+  emitted: Harness["emitted"];
+  state: { transcript: TranscriptMessage[] };
+}
+
+function environment(
   config: Partial<V2RuntimeDependencies["config"]> = {},
-): Harness {
+  directory: string = "/repo",
+): HarnessEnvironment {
   const tools = new Map<string, FakeTool>();
   const hooks: Harness["hooks"] = {};
   const queries: string[] = [];
@@ -149,7 +163,7 @@ function harness(
   const registration = { dispose: async () => undefined };
 
   const ctx = {
-    location: { directory: "/repo" },
+    location: { directory },
     tool: {
       transform: async (callback: (editor: unknown) => void) => {
         callback({
@@ -178,7 +192,7 @@ function harness(
       },
       get: async ({ sessionID }: { sessionID: string }) => ({
         id: sessionID,
-        location: { directory: "/repo" },
+        location: { directory },
       }),
       context: async () => state.transcript,
     },
@@ -250,7 +264,7 @@ function harness(
     deleteMemory: async () => ({ success: true }),
   };
 
-  const runtime = new V2Runtime(ctx as unknown as V2Context, {
+  const deps: Partial<V2RuntimeDependencies> = {
     configured: true,
     config: {
       recallMode: "direct",
@@ -270,22 +284,40 @@ function harness(
       latestVersion: "9.9.9",
       updateCommand: "bunx opencode-supermemory@latest install",
     }),
-  });
+  };
 
   return {
     ctx: ctx as unknown as V2Context,
-    runtime,
+    deps,
     tools,
     hooks,
     queries,
     writes,
     adds,
     emitted,
+    state,
+  };
+}
+
+function harness(
+  config: Partial<V2RuntimeDependencies["config"]> = {},
+): Harness {
+  const env = environment(config);
+  const runtime = new V2Runtime(env.ctx, env.deps);
+  return {
+    ctx: env.ctx,
+    runtime,
+    tools: env.tools,
+    hooks: env.hooks,
+    queries: env.queries,
+    writes: env.writes,
+    adds: env.adds,
+    emitted: env.emitted,
     get transcript() {
-      return state.transcript;
+      return env.state.transcript;
     },
     set transcript(value: TranscriptMessage[]) {
-      state.transcript = value;
+      env.state.transcript = value;
     },
   };
 }
@@ -462,5 +494,96 @@ describe("OpenCode 2 runtime", () => {
     });
     expect(h.emitted.map((event) => event.kind)).toEqual(["recalling", "recalled"]);
     h.runtime.cleanup();
+  });
+});
+
+async function recallText(env: HarnessEnvironment): Promise<string> {
+  const tool = env.tools.get(SUPERMEMORY_RECALL_TOOL_NAME)!;
+  const result = await tool.execute({ query: "bun" }, { sessionID: "s1" });
+  return String(result.content);
+}
+
+async function recallAllowed(env: HarnessEnvironment): Promise<boolean> {
+  const evaluation = { action: SUPERMEMORY_RECALL_TOOL_NAME, effect: "ask" };
+  await env.hooks["permission.evaluate"]!(evaluation);
+  return evaluation.effect === "allow";
+}
+
+describe("OpenCode 2 setup ownership", () => {
+  test("keeps two different locations registered and usable", async () => {
+    const first = environment({}, "/repo/one");
+    const second = environment({}, "/repo/two");
+
+    const cleanupFirst = await setupV2(first.ctx, first.deps);
+    const cleanupSecond = await setupV2(second.ctx, second.deps);
+
+    const expectedTools = [
+      SUPERMEMORY_TOOL_NAME,
+      SUPERMEMORY_RECALL_TOOL_NAME,
+    ].sort();
+    expect([...first.tools.keys()].sort()).toEqual(expectedTools);
+    expect([...second.tools.keys()].sort()).toEqual(expectedTools);
+
+    expect(await recallText(first)).toContain('"success":true');
+    expect(await recallText(second)).toContain('"success":true');
+    expect(await recallAllowed(first)).toBe(true);
+    expect(await recallAllowed(second)).toBe(true);
+
+    cleanupSecond();
+    expect(await recallText(first)).toContain('"success":true');
+    expect(await recallText(second)).toContain('"success":false');
+    expect(await recallAllowed(first)).toBe(true);
+    expect(await recallAllowed(second)).toBe(false);
+
+    cleanupFirst();
+    expect(await recallAllowed(first)).toBe(false);
+  });
+
+  test("replaces only the same directory and ignores stale cleanup", async () => {
+    const directory = "/repo/same";
+    const original = environment({}, directory);
+    const replacement = environment({}, directory);
+    const other = environment({}, "/repo/other");
+
+    const cleanupOriginal = await setupV2(original.ctx, original.deps);
+    const cleanupOther = await setupV2(other.ctx, other.deps);
+    const cleanupReplacement = await setupV2(replacement.ctx, replacement.deps);
+
+    expect(await recallText(original)).toContain('"success":false');
+    expect(await recallText(replacement)).toContain('"success":true');
+    expect(await recallText(other)).toContain('"success":true');
+    expect(await recallAllowed(original)).toBe(false);
+    expect(await recallAllowed(replacement)).toBe(true);
+    expect(await recallAllowed(other)).toBe(true);
+
+    cleanupOriginal();
+    cleanupOriginal();
+    expect(await recallText(replacement)).toContain('"success":true');
+    expect(await recallText(other)).toContain('"success":true');
+    expect(await recallAllowed(replacement)).toBe(true);
+    expect(await recallAllowed(other)).toBe(true);
+
+    cleanupReplacement();
+    expect(await recallText(replacement)).toContain('"success":false');
+    expect(await recallText(other)).toContain('"success":true');
+    expect(await recallAllowed(replacement)).toBe(false);
+    expect(await recallAllowed(other)).toBe(true);
+
+    cleanupOther();
+  });
+
+  test("tearing down one directory leaves the other registered", async () => {
+    const left = environment({}, "/repo/left");
+    const right = environment({}, "/repo/right");
+
+    const cleanupLeft = await setupV2(left.ctx, left.deps);
+    const cleanupRight = await setupV2(right.ctx, right.deps);
+
+    cleanupLeft();
+    expect(await recallText(left)).toContain('"success":false');
+    expect(await recallText(right)).toContain('"success":true');
+
+    cleanupRight();
+    expect(await recallText(right)).toContain('"success":false');
   });
 });
