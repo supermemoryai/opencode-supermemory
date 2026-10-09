@@ -1,9 +1,11 @@
-import Supermemory from "supermemory";
+import Supermemory from "supermemory-legacy";
+import { V5Client } from "./v5-client.js";
 import {
   CONFIG,
   PLUGIN_VERSION,
   SUPERMEMORY_API_KEY,
   getApiBaseUrl,
+  getApiVersion,
   isConfigured,
 } from "../config.js";
 import { log } from "./logger.js";
@@ -101,8 +103,8 @@ function isNotFoundError(error: unknown): boolean {
   return (
     typeof error === "object" &&
     error !== null &&
-    "status" in error &&
-    error.status === 404
+    (("status" in error && error.status === 404) ||
+      ("statusCode" in error && error.statusCode === 404))
   );
 }
 
@@ -110,8 +112,9 @@ function isAuthorizationError(error: unknown): boolean {
   return (
     typeof error === "object" &&
     error !== null &&
-    "status" in error &&
-    (error.status === 401 || error.status === 403)
+    (("status" in error && (error.status === 401 || error.status === 403)) ||
+      ("statusCode" in error &&
+        (error.statusCode === 401 || error.statusCode === 403)))
   );
 }
 
@@ -124,7 +127,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 }
 
 export class SupermemoryClient {
-  private client: Supermemory | null = null;
+  private client: Supermemory | V5Client | null = null;
 
   private formatConversationMessage(message: ConversationMessage): string {
     const content =
@@ -156,16 +159,25 @@ export class SupermemoryClient {
       .join("\n");
   }
 
-  private getClient(): Supermemory {
+  private getClient(): Supermemory | V5Client {
     if (!this.client) {
       if (!isConfigured()) {
         throw new Error("SUPERMEMORY_API_KEY not set");
       }
-      this.client = new Supermemory({
+      const legacyClient = new Supermemory({
         apiKey: SUPERMEMORY_API_KEY,
         baseURL: getApiBaseUrl(),
         defaultHeaders: { "x-sm-source": OPENCODE_SOURCE },
       });
+      this.client =
+        getApiVersion() === "v5"
+          ? new V5Client(
+              SUPERMEMORY_API_KEY!,
+              getApiBaseUrl(),
+              legacyClient.settings,
+              TIMEOUT_MS - TIMEOUT_BACKSTOP_GRACE_MS,
+            )
+          : legacyClient;
       try {
         void this.client.settings
           .update(
@@ -198,7 +210,11 @@ export class SupermemoryClient {
     log("searchMemories: start", { containerTag, scope });
     try {
       const hookTimeout = options?.timeoutMs;
-      const result = await withTimeout(
+      const result = await withTimeout<{
+        results: unknown[];
+        total: number;
+        timing: number;
+      }>(
         this.getClient().search.memories(
           {
             q: query,
@@ -316,7 +332,10 @@ export class SupermemoryClient {
     log("getProfile: start", { containerTag, scope });
     try {
       const hookTimeout = options?.timeoutMs;
-      const result = await withTimeout(
+      const result = await withTimeout<{
+        profile: { static: string[]; dynamic: string[] } | null;
+        searchResults?: { results: unknown[]; total: number; timing?: number };
+      }>(
         this.getClient().profile(
           {
             containerTag,
@@ -465,6 +484,13 @@ export class SupermemoryClient {
           ? requestTimeout + TIMEOUT_BACKSTOP_GRACE_MS
           : TIMEOUT_MS,
       );
+      if (
+        typeof result.id !== "string" ||
+        !result.id.trim() ||
+        result.status === "failed"
+      ) {
+        throw new Error("Document acceptance was invalid or processing failed");
+      }
       log("addMemory: success", { id: result.id });
       return { success: true as const, ...result };
     } catch (error) {
@@ -478,6 +504,7 @@ export class SupermemoryClient {
   async deleteMemory(memoryId: string, containerTags: string[] = []) {
     log("deleteMemory: start", { memoryId });
     const uniqueTags = [...new Set(containerTags.filter(Boolean))];
+    const confirmedMemoryMisses: string[] = [];
     let retainedAuthorizationError: unknown;
 
     for (const [index, containerTag] of uniqueTags.entries()) {
@@ -489,7 +516,10 @@ export class SupermemoryClient {
         log("deleteMemory: forgotten", { memoryId });
         return { success: true as const };
       } catch (error) {
-        if (isNotFoundError(error)) continue;
+        if (isNotFoundError(error)) {
+          confirmedMemoryMisses.push(containerTag);
+          continue;
+        }
         if (index > 0 && isAuthorizationError(error)) {
           retainedAuthorizationError ??= error;
           continue;
@@ -503,8 +533,11 @@ export class SupermemoryClient {
     }
 
     try {
+      const client = this.getClient();
       await withTimeout(
-        this.getClient().memories.delete(memoryId),
+        client instanceof V5Client
+          ? client.deleteDocument(memoryId, confirmedMemoryMisses)
+          : client.memories.delete(memoryId),
         TIMEOUT_MS,
       );
       log("deleteMemory: deleted document", { memoryId });
@@ -530,7 +563,10 @@ export class SupermemoryClient {
   ): Promise<ListResponse> {
     log("listMemories: start", { containerTag, limit, scope });
     try {
-      const result = await withTimeout(
+      const result = await withTimeout<{
+        memories: unknown[];
+        pagination: ListResponse["pagination"];
+      }>(
         this.getClient().memories.list({
           containerTags: [containerTag],
           filters: scope ? getScopeFilters(scope) : undefined,

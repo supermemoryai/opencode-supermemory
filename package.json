@@ -1,6 +1,6 @@
 {
   "name": "opencode-supermemory",
-  "version": "2.0.15",
+  "version": "2.0.16",
   "description": "OpenCode plugin that gives coding agents persistent memory using Supermemory",
   "type": "module",
   "main": "dist/index.js",
@@ -38,7 +38,7 @@
   },
   "scripts": {
     "generate:version": "node scripts/sync-version.mjs",
-    "build": "node scripts/sync-version.mjs && bun build ./src/index.ts ./src/server.ts ./src/rpc.ts --outdir ./dist --target node && bun build ./src/tui.tsx --outfile ./dist/tui.js --target bun --external @opentui/core --external @opentui/solid --external solid-js && bun build ./src/v2/index.ts --outfile ./dist/v2/index.js --target node && bun build ./src/cli.ts --outfile ./dist/cli.js --target node && tsc --emitDeclarationOnly",
+    "build": "node scripts/sync-version.mjs && bun build ./src/index.ts ./src/server.ts ./src/rpc.ts --outdir ./dist --target node && bun build ./src/tui.tsx --outfile ./dist/tui.js --target bun --external @opentui/core --external @opentui/solid --external solid-js && bun build ./src/v2/index.ts --outfile ./dist/v2/index.js --target node && bun build ./src/cli.ts --outfile ./dist/cli.js --target node && tsc --emitDeclarationOnly && node scripts/copy-sdk-licenses.mjs",
     "dev": "tsc --watch",
     "typecheck": "node scripts/sync-version.mjs && tsc --noEmit",
     "test": "node scripts/sync-version.mjs && bun test"
@@ -67,7 +67,8 @@
     "@types/bun": "latest",
     "jsonc-parser": "3.3.1",
     "solid-js": "1.9.15",
-    "supermemory": "^4.0.0",
+    "supermemory": "5.0.1",
+    "supermemory-legacy": "npm:supermemory@4.0.0",
     "typescript": "^5.7.3"
   },
   "peerDependencies": {

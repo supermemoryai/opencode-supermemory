@@ -167,7 +167,7 @@ Completed conversations are captured automatically:
 - Any remaining turns are flushed when the session is deleted or the OpenCode
   instance shuts down.
 - Synthetic plugin context is excluded and `<private>` content is redacted.
-- Stable capture IDs make repeated lifecycle events idempotent.
+- Stable capture IDs retain batch identity across repeated lifecycle events; they do not guarantee exactly-once processing or billing after an ambiguous response.
 
 ### Keyword Detection
 
@@ -298,6 +298,7 @@ does not require a migration.
 | --- | --- |
 | `SUPERMEMORY_API_KEY` | Your Supermemory API key (takes precedence over the config file). |
 | `SUPERMEMORY_API_URL` / `SUPERMEMORY_BASE_URL` | Override the Supermemory API base URL. |
+| `SUPERMEMORY_API_VERSION` | Select `legacy` or `v5`, overriding `apiVersion` in the config file. |
 | `SUPERMEMORY_AUTH_URL` | Override the browser-auth base URL. |
 | `SUPERMEMORY_AUTH_TIMEOUT` | Browser-auth timeout in milliseconds (default 5 minutes). |
 | `SUPERMEMORY_REPO_TAG` | Explicit project-container override, checked before the config value. |
@@ -305,6 +306,33 @@ does not require a migration.
 | `SUPERMEMORY_DEBUG` | Set to show `[recall-decision]` lines and enable debug logging. |
 
 ### `~/.config/opencode/supermemory.jsonc`
+
+Hosted content calls use the official Supermemory v5 SDK. Custom base URLs default
+to the bundled legacy SDK so existing self-hosted servers, including 0.0.8, keep
+working. After independently upgrading a custom server to support v5, opt in with
+`"apiVersion": "v5"` or `SUPERMEMORY_API_VERSION=v5`. Set `legacy` explicitly to
+keep the old content protocol on any endpoint. Failed requests never switch API
+versions or reroute to hosted Supermemory, and existing container names, IDs,
+credentials, capture cadence, and configuration files are not migrated or renamed.
+
+The existing best-effort `filterPrompt` / `shouldLLMFilter` settings update remains
+on the legacy settings endpoint for both protocols. v5 has no equivalent filter
+toggle; the plugin does not replace organization context or request administrator
+permissions. A server without that legacy endpoint cannot apply these settings;
+capture and recall still work, and the failure is recorded in the existing log.
+Browser login and account status also retain their separate legacy auth/session
+boundary.
+
+v5 capture uses document POST append/diff with `dreaming: "dynamic"`; accepted
+documents may take minutes to form recallable memories. The plugin does not enable
+the extra-billable instant mode. Profiles normalize fact objects to text and issue
+a separate search only when a query is requested. Document lists fetch canonical
+content per document to retain the previous content-inclusive response, so lists
+and compaction can require additional requests under the existing timeout budget.
+Individual failed, invalid or late content reads retain the listed document's
+identity, summary and lifecycle fields; hydration uses the remaining list budget
+with a return grace. Content is accepted only from the matching document ID and
+scope, not from a different or malformed response.
 
 ```jsonc
 {
