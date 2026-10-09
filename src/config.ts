@@ -18,6 +18,7 @@ export type RecallMode = "direct" | "advisory" | "off";
 interface SupermemoryConfig {
   apiKey?: string;
   baseUrl?: string;
+  apiVersion?: "legacy" | "v5";
   similarityThreshold?: number;
   maxMemories?: number;
   maxProjectMemories?: number;
@@ -56,7 +57,7 @@ const DEFAULT_KEYWORD_PATTERNS = [
   "always\\s+remember",
 ];
 
-const DEFAULTS: Required<Omit<SupermemoryConfig, "apiKey" | "baseUrl" | "userContainerTag" | "projectContainerTag" | "recallDirective">> = {
+const DEFAULTS: Required<Omit<SupermemoryConfig, "apiKey" | "baseUrl" | "apiVersion" | "userContainerTag" | "projectContainerTag" | "recallDirective">> = {
   similarityThreshold: 0.55,
   maxMemories: 5,
   maxProjectMemories: 10,
@@ -170,6 +171,15 @@ export function getApiBaseUrl(): string {
     throw new Error("Invalid baseUrl: expected an absolute http(s) URL");
   }
   return normalized;
+}
+
+export function getApiVersion(): "legacy" | "v5" {
+  const version = process.env.SUPERMEMORY_API_VERSION ?? fileConfig.apiVersion;
+  if (version !== undefined) {
+    if (version === "legacy" || version === "v5") return version;
+    throw new Error('Invalid apiVersion: expected "legacy" or "v5"');
+  }
+  return getApiBaseUrl() === DEFAULT_BASE_URL ? "v5" : "legacy";
 }
 
 export const CONFIG_FILE = CONFIG_FILES[1];
