@@ -129,7 +129,7 @@ export interface V2RuntimeDependencies {
   config: RuntimeConfig;
   memoryClient: RuntimeMemoryClient;
   executeTool: typeof executeSupermemoryTool;
-  resolveTags: typeof getTags;
+  resolveTags: (directory: string) => Promise<ResolvedTags>;
   logger: typeof log;
   checkUpdate: () => Promise<UpdateInfo | null>;
 }
@@ -867,7 +867,7 @@ export class V2Runtime {
         throw new Error(`Unable to resolve directory for OpenCode session ${sessionID}`);
       }
       state.directory = directory;
-      state.tags = this.#deps.resolveTags(directory);
+      state.tags = await this.#deps.resolveTags(directory);
       return state.tags;
     })();
 
