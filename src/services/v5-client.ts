@@ -9,6 +9,7 @@ import type {
   ProfileResponse,
   SearchResultItem,
 } from "./client.js";
+import { log } from "./logger.js";
 
 type LegacyOptions = { timeout?: number; maxRetries?: number };
 type ScopedRequest = {
@@ -70,6 +71,7 @@ export class V5Client {
         options?: LegacyOptions,
       ): Promise<unknown>;
     },
+    private readonly listBudgetMs: number,
   ) {
     this.sdk = new Supermemory({
       apiKey,
@@ -220,6 +222,7 @@ export class V5Client {
       if (!namespace || request.containerTags.length !== 1) {
         throw new Error("Document list requires one namespace");
       }
+      const deadline = Date.now() + this.listBudgetMs;
       const result = await this.sdk.list(
         namespace,
         "documents",
@@ -232,23 +235,66 @@ export class V5Client {
         requestOptions(),
       );
       const memories: ListMemoryItem[] = await Promise.all(
-        result.documents.map(async (item) => {
-          const document = request.includeContent
-            ? await this.sdk.documents.get(
-                namespace,
-                item.id,
-                undefined,
-                requestOptions(),
-              )
-            : item;
-          return {
-            ...document,
-            status: document.system?.status,
-            createdAt: document.system?.createdAt,
-            updatedAt: document.system?.updatedAt,
-            containerTags: [namespace],
-          };
-        }),
+        result.documents
+          .filter(
+            (item) => typeof item?.id === "string" && item.id.trim().length > 0,
+          )
+          .map(async (item) => {
+            let content: string | null | undefined;
+            if (request.includeContent) {
+              const controller = new AbortController();
+              let timer: ReturnType<typeof setTimeout> | undefined;
+              try {
+                const remainingMs = deadline - Date.now();
+                if (remainingMs <= 0)
+                  throw new Error("Document hydration budget exhausted");
+                const document = await Promise.race([
+                  this.sdk.documents.get(namespace, item.id, undefined, {
+                    ...requestOptions(),
+                    timeoutInSeconds: remainingMs / 1000,
+                    abortSignal: controller.signal,
+                  }),
+                  new Promise<never>((_, reject) => {
+                    timer = setTimeout(() => {
+                      controller.abort();
+                      reject(new Error("Document hydration timed out"));
+                    }, remainingMs);
+                  }),
+                ]);
+                if (
+                  document.id === item.id &&
+                  (typeof document.content === "string" ||
+                    document.content === null) &&
+                  (request.filters?.AND.every(
+                    ({ key, value }) => document.metadata?.[key] === value,
+                  ) ??
+                    true)
+                ) {
+                  content = document.content;
+                } else {
+                  log("listMemories: content hydration skipped", {
+                    id: item.id,
+                    reason: "Invalid document response",
+                  });
+                }
+              } catch {
+                log("listMemories: content hydration skipped", {
+                  id: item.id,
+                  reason: "Document read failed",
+                });
+              } finally {
+                if (timer) clearTimeout(timer);
+              }
+            }
+            return {
+              ...item,
+              ...(content !== undefined ? { content } : {}),
+              status: item.system?.status,
+              createdAt: item.system?.createdAt,
+              updatedAt: item.system?.updatedAt,
+              containerTags: [namespace],
+            };
+          }),
       );
       return { memories, pagination: result.pagination };
     },

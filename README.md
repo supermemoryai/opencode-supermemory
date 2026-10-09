@@ -329,6 +329,10 @@ the extra-billable instant mode. Profiles normalize fact objects to text and iss
 a separate search only when a query is requested. Document lists fetch canonical
 content per document to retain the previous content-inclusive response, so lists
 and compaction can require additional requests under the existing timeout budget.
+Individual failed, invalid or late content reads retain the listed document's
+identity, summary and lifecycle fields; hydration uses the remaining list budget
+with a return grace. Content is accepted only from the matching document ID and
+scope, not from a different or malformed response.
 
 ```jsonc
 {

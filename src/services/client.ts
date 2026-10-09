@@ -175,6 +175,7 @@ export class SupermemoryClient {
               SUPERMEMORY_API_KEY!,
               getApiBaseUrl(),
               legacyClient.settings,
+              TIMEOUT_MS - TIMEOUT_BACKSTOP_GRACE_MS,
             )
           : legacyClient;
       try {
@@ -503,6 +504,7 @@ export class SupermemoryClient {
   async deleteMemory(memoryId: string, containerTags: string[] = []) {
     log("deleteMemory: start", { memoryId });
     const uniqueTags = [...new Set(containerTags.filter(Boolean))];
+    const confirmedMemoryMisses: string[] = [];
     let retainedAuthorizationError: unknown;
 
     for (const [index, containerTag] of uniqueTags.entries()) {
@@ -514,7 +516,10 @@ export class SupermemoryClient {
         log("deleteMemory: forgotten", { memoryId });
         return { success: true as const };
       } catch (error) {
-        if (isNotFoundError(error)) continue;
+        if (isNotFoundError(error)) {
+          confirmedMemoryMisses.push(containerTag);
+          continue;
+        }
         if (index > 0 && isAuthorizationError(error)) {
           retainedAuthorizationError ??= error;
           continue;
@@ -531,7 +536,7 @@ export class SupermemoryClient {
       const client = this.getClient();
       await withTimeout(
         client instanceof V5Client
-          ? client.deleteDocument(memoryId, uniqueTags)
+          ? client.deleteDocument(memoryId, confirmedMemoryMisses)
           : client.memories.delete(memoryId),
         TIMEOUT_MS,
       );
