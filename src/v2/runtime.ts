@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { resolve } from "node:path";
 
 import type { Plugin } from "@opencode/plugin";
 import type { SessionHooks } from "@opencode/plugin/promise/session";
@@ -11,6 +12,7 @@ import {
 } from "../services/activity.js";
 import {
   AUTOMATIC_CAPTURE_TIMEOUT_MS,
+  CaptureRetryBudget,
   buildCadenceBatches,
   buildSessionEndBatch,
   getCaptureId,
@@ -61,6 +63,21 @@ const INLINE_CODE_PATTERN = /`[^`]+`/g;
 const SYNTHETIC_METADATA_KEY = "supermemory";
 const UPDATE_COMMAND = "bunx opencode-supermemory@latest install";
 const MAX_DISPATCHES_PER_SESSION = 8;
+const MAX_TRACKED_SESSION_OWNERS = 1_000;
+const MAX_SAVED_CAPTURES_PER_SESSION = 500;
+const SAVED_CAPTURES_KEY_PREFIX = "capture/saved/";
+
+/**
+ * Session events this runtime acts on. OpenCode delivers every location's
+ * events to every plugin instance, so these are only handled for sessions in
+ * this instance's own directory.
+ */
+const OWNED_SESSION_EVENTS = new Set([
+  "session.execution.succeeded",
+  "session.execution.interrupted",
+  "session.deleted",
+  "session.compaction.ended",
+]);
 const MIN_SUMMARY_CHARS = 100;
 
 export const SUPERMEMORY_TOOL_NAME = "supermemory";
@@ -150,6 +167,7 @@ export interface V2Event {
   id?: string;
   type: string;
   data?: Record<string, unknown>;
+  location?: { directory?: string };
 }
 
 /** Minimal shape of a persisted OpenCode 2 transcript message. */
@@ -176,6 +194,7 @@ interface SessionState {
   turns: CaptureTurn[];
   turnIndex: Map<string, number>;
   completedCaptureIds: Set<string>;
+  savedCapturesLoaded?: Promise<void>;
 }
 
 interface PendingSummary {
@@ -196,6 +215,15 @@ function mergeDependencies(
     ...overrides,
     config: { ...DEFAULT_DEPENDENCIES.config, ...overrides?.config },
   };
+}
+
+function normalizeDirectory(directory: string): string {
+  const resolved = resolve(directory).replace(/[\\/]+$/, "") || resolve(directory);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+export function isSameDirectory(left: string, right: string): boolean {
+  return normalizeDirectory(left) === normalizeDirectory(right);
 }
 
 function sha256(value: string): string {
@@ -442,6 +470,9 @@ export class V2Runtime {
   readonly #pendingSummaries = new Map<string, PendingSummary>();
   readonly #summaryInFlight = new Set<string>();
   readonly #deduper = new EventDeduper();
+  readonly #sessionOwners = new Map<string, boolean>();
+  readonly #captureRetries = new CaptureRetryBudget();
+  readonly #ownerLookups = new Map<string, Promise<boolean>>();
   readonly #registrations: Registration[] = [];
   readonly #abortController = new AbortController();
   #emitActivity: ((notice: MemoryActivityNotice) => void) | undefined;
@@ -702,6 +733,16 @@ export class V2Runtime {
     if (!this.active || this.#deduper.hasSeen(event.id)) return;
     const sessionID = this.#eventSessionID(event);
 
+    if (
+      sessionID &&
+      OWNED_SESSION_EVENTS.has(event.type) &&
+      !(await this.#ownsSession(sessionID, event))
+    ) {
+      if (event.type === "session.deleted") this.#sessionOwners.delete(sessionID);
+      return;
+    }
+    if (!this.active) return;
+
     if (sessionID && event.type !== "session.compaction.ended") {
       void this.#retryPendingSummaries(sessionID);
     }
@@ -728,11 +769,15 @@ export class V2Runtime {
         if (!sessionID) return;
         const state = this.#states.get(sessionID);
         this.#recall.delete(sessionID);
+        this.#sessionOwners.delete(sessionID);
         if (!state) return;
         await this.#runCaptureExclusive(sessionID, () =>
           this.#captureSessionEnd(sessionID),
         );
         this.#states.delete(sessionID);
+        void (this.#ctx as { storage?: V2Context["storage"] }).storage
+          ?.remove(`${SAVED_CAPTURES_KEY_PREFIX}${sessionID}`)
+          .catch(() => undefined);
         return;
       }
 
@@ -778,11 +823,16 @@ export class V2Runtime {
     this.#active = false;
     this.#abortController.abort();
 
-    void this.#flushAll(true).catch((error) => {
-      this.#deps.logger("v2 cleanup capture failed", { error: String(error) });
-    });
-    this.#states.clear();
-    this.#recall.clear();
+    // Flush while the session state still records which batches were saved,
+    // so only unsaved turns are sent; clearing first would re-send them all.
+    void this.#flushAll(true)
+      .catch((error) => {
+        this.#deps.logger("v2 cleanup capture failed", { error: String(error) });
+      })
+      .finally(() => {
+        this.#states.clear();
+        this.#recall.clear();
+      });
 
     for (const registration of this.#registrations.splice(0)) {
       this.#disposeRegistration(registration);
@@ -796,6 +846,60 @@ export class V2Runtime {
       return;
     }
     this.#registrations.push(registration);
+  }
+
+  /**
+   * Whether a session belongs to this instance's directory. Hooks and tools
+   * are already scoped to the directory, so any session with state here is
+   * ours. Otherwise the event's location decides, and events without one fall
+   * back to a single session lookup that is cached per session.
+   */
+  async #ownsSession(sessionID: string, event: V2Event): Promise<boolean> {
+    const own = this.#ctx.location?.directory;
+    if (!own || this.#states.has(sessionID)) return true;
+
+    const known = this.#sessionOwners.get(sessionID);
+    if (known !== undefined) return known;
+
+    const eventDirectory = event.location?.directory;
+    if (eventDirectory) {
+      return this.#rememberOwner(sessionID, isSameDirectory(eventDirectory, own));
+    }
+
+    const pending = this.#ownerLookups.get(sessionID);
+    if (pending) return pending;
+
+    const lookup = (async () => {
+      try {
+        const session = await this.#ctx.session.get({ sessionID });
+        const directory = (session as { location?: { directory?: string } })
+          .location?.directory;
+        if (!directory) return false;
+        return this.#rememberOwner(sessionID, isSameDirectory(directory, own));
+      } catch (error) {
+        this.#deps.logger("v2 session owner lookup failed; skipping event", {
+          sessionID,
+          type: event.type,
+          error: String(error),
+        });
+        return false;
+      } finally {
+        this.#ownerLookups.delete(sessionID);
+      }
+    })();
+    this.#ownerLookups.set(sessionID, lookup);
+    return lookup;
+  }
+
+  #rememberOwner(sessionID: string, owned: boolean): boolean {
+    this.#sessionOwners.delete(sessionID);
+    this.#sessionOwners.set(sessionID, owned);
+    while (this.#sessionOwners.size > MAX_TRACKED_SESSION_OWNERS) {
+      const oldest = this.#sessionOwners.keys().next().value;
+      if (oldest === undefined) break;
+      this.#sessionOwners.delete(oldest);
+    }
+    return owned;
   }
 
   #state(sessionID: string): SessionState {
@@ -1069,6 +1173,8 @@ export class V2Runtime {
 
     if (result.success) {
       state.completedCaptureIds.add(captureId);
+      this.#captureRetries.recordSuccess(captureId);
+      await this.#persistSavedCaptures(sessionID, state);
       this.#activity.saved();
       this.#deps.logger("[capture] conversation batch saved", {
         sessionID,
@@ -1079,18 +1185,68 @@ export class V2Runtime {
       return true;
     }
 
-    this.#deps.logger("[capture] failed to save conversation batch", {
-      sessionID,
-      reason,
-      startTurn: batch.startTurn,
-      endTurn: batch.endTurn,
-      error: result.error,
-    });
-    return false;
+    const exhausted = this.#captureRetries.recordFailure(captureId);
+    if (exhausted) state.completedCaptureIds.add(captureId);
+    this.#deps.logger(
+      exhausted
+        ? "[capture] giving up on conversation batch after repeated failures"
+        : "[capture] failed to save conversation batch",
+      {
+        sessionID,
+        reason,
+        startTurn: batch.startTurn,
+        endTurn: batch.endTurn,
+        error: result.error,
+      },
+    );
+    return exhausted;
+  }
+
+  /**
+   * Saved batches are kept in plugin storage so a reloaded or restarted
+   * runtime does not send turns that an earlier instance already saved.
+   * Storage is best effort: when it is unavailable, capture still works.
+   */
+  #loadSavedCaptures(sessionID: string, state: SessionState): Promise<void> {
+    state.savedCapturesLoaded ??= (async () => {
+      const storage = (this.#ctx as { storage?: V2Context["storage"] }).storage;
+      if (!storage) return;
+      try {
+        const saved = await storage.get(`${SAVED_CAPTURES_KEY_PREFIX}${sessionID}`);
+        if (Array.isArray(saved)) {
+          for (const id of saved) {
+            if (typeof id === "string") state.completedCaptureIds.add(id);
+          }
+        }
+      } catch (error) {
+        this.#deps.logger("[capture] could not read saved batches", {
+          sessionID,
+          error: String(error),
+        });
+      }
+    })();
+    return state.savedCapturesLoaded;
+  }
+
+  async #persistSavedCaptures(sessionID: string, state: SessionState): Promise<void> {
+    const storage = (this.#ctx as { storage?: V2Context["storage"] }).storage;
+    if (!storage) return;
+    try {
+      await storage.set(
+        `${SAVED_CAPTURES_KEY_PREFIX}${sessionID}`,
+        [...state.completedCaptureIds].slice(-MAX_SAVED_CAPTURES_PER_SESSION),
+      );
+    } catch (error) {
+      this.#deps.logger("[capture] could not record saved batch", {
+        sessionID,
+        error: String(error),
+      });
+    }
   }
 
   async #captureCadence(sessionID: string): Promise<void> {
     const state = this.#state(sessionID);
+    await this.#loadSavedCaptures(sessionID, state);
     const turns = await this.#refreshTurns(sessionID, state);
     for (const batch of buildCadenceBatches(
       turns,
@@ -1102,6 +1258,7 @@ export class V2Runtime {
 
   async #captureSessionEnd(sessionID: string): Promise<void> {
     const state = this.#state(sessionID);
+    await this.#loadSavedCaptures(sessionID, state);
     const turns = await this.#refreshTurns(sessionID, state);
     for (const batch of buildCadenceBatches(
       turns,
@@ -1255,7 +1412,9 @@ export class V2Runtime {
   }
 }
 
-const OWNER_KEY = Symbol.for("opencode-supermemory.v2.owner");
+function ownerKeyFor(directory: string | undefined): symbol {
+  return Symbol.for(`opencode-supermemory.v2.owner:${directory ?? "global"}`);
+}
 
 interface GlobalOwner {
   generation: number;
@@ -1267,14 +1426,18 @@ function ownerRegistry(): Record<symbol, GlobalOwner | undefined> {
 }
 
 /**
- * Starts the OpenCode 2 runtime. Only one instance is active per process, so a
- * hot-reloaded plugin replaces (and cleans up) the previous generation.
+ * Starts the OpenCode 2 runtime. The OpenCode server instantiates the plugin
+ * once per project directory in the same process, so ownership is scoped per
+ * directory: a hot-reloaded plugin replaces (and cleans up) the previous
+ * generation of the same directory only, while other directories keep their
+ * runtime active.
  */
 export async function setupV2(
   ctx: V2Context,
   options?: Partial<V2RuntimeDependencies>,
 ): Promise<() => void> {
   const registry = ownerRegistry();
+  const OWNER_KEY = ownerKeyFor(ctx.location?.directory);
   const previous = registry[OWNER_KEY];
   previous?.cleanup();
 
