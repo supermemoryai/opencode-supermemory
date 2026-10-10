@@ -92,6 +92,7 @@
     "hooks": [
       "chat.message",
       "permission.ask",
+      "experimental.session.compacting",
       "event"
     ]
   },
