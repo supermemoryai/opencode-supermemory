@@ -23,6 +23,7 @@ function getGitRoot(directory: string): string | null {
         cwd: directory,
         encoding: "utf-8",
         stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
       }).trim();
       return gitRoot || null;
     }
@@ -31,6 +32,7 @@ function getGitRoot(directory: string): string | null {
       cwd: directory,
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
     }).trim();
 
     if (gitCommonDir === ".git") {
@@ -38,6 +40,7 @@ function getGitRoot(directory: string): string | null {
         cwd: directory,
         encoding: "utf-8",
         stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
       }).trim();
       return gitRoot || null;
     }
@@ -51,6 +54,7 @@ function getGitRoot(directory: string): string | null {
       cwd: directory,
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
     }).trim();
     return gitRoot || null;
   } catch {
@@ -68,6 +72,7 @@ function getGitEmail(directory: string): string | null {
       cwd: getProjectBasePath(directory),
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
     }).trim();
     return email || null;
   } catch {
@@ -120,6 +125,7 @@ function getGitRepoInfo(directory: string): {
       cwd: directory,
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
     }).trim();
     const normalizedRemote = normalizeGitRemote(remoteUrl);
     const displayRemote = remoteUrl.replace(/\/+$/, "").replace(/\.git$/i, "");
