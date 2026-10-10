@@ -79,7 +79,7 @@ function isSupermemoryRecallSearch(input: Permission): boolean {
  */
 export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
   const { directory } = ctx;
-  const tags = getTags(directory);
+  const tags = await getTags(directory);
   const injectedSessions = new Set<string>();
   const recallSessions = new RecallSessionCache();
   const activity = createMemoryActivityReporter(ctx.client);

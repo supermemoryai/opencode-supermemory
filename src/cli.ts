@@ -624,7 +624,7 @@ function describeOpenCodeRegistration(): string[] {
 
 async function status(): Promise<number> {
   const apiUrl = getApiBaseUrl();
-  const tags = getTags(process.cwd());
+  const tags = await getTags(process.cwd());
   const lines: string[] = [];
 
   lines.push("supermemory status");

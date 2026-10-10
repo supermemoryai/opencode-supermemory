@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
-import { execSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { hostname, homedir, userInfo } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { CONFIG } from "../config.js";
+
+const GIT_TIMEOUT_MS = 2000;
 
 function sha256(input: string): string {
   return createHash("sha256").update(input).digest("hex").slice(0, 16);
@@ -14,31 +16,73 @@ const repoInfoCache = new Map<
   { name: string | null; normalizedRemote: string | null }
 >();
 
-function getGitRoot(directory: string): string | null {
-  const isolateWorktrees = process.env.SUPERMEMORY_ISOLATE_WORKTREES === "true";
+interface GitMetadata {
+  basePath: string;
+  repoName: string | null;
+  normalizedRemote: string | null;
+  email: string | null;
+  isolateWorktrees: boolean;
+}
 
+function isGitCancellation(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const gitError = error as Error & {
+    killed?: boolean;
+    signal?: NodeJS.Signals | null;
+    code?: string | null;
+  };
+  return (
+    gitError.killed === true ||
+    gitError.signal != null ||
+    gitError.name === "AbortError" ||
+    gitError.code === "ETIMEDOUT"
+  );
+}
+
+function isIsolateWorktrees(): boolean {
+  return process.env.SUPERMEMORY_ISOLATE_WORKTREES === "true";
+}
+
+function runGit(args: string[], cwd: string): Promise<string> {
+  return new Promise((resolvePromise, reject) => {
+    execFile(
+      "git",
+      args,
+      {
+        cwd,
+        encoding: "utf-8",
+        timeout: GIT_TIMEOUT_MS,
+        killSignal: "SIGKILL",
+        windowsHide: true,
+      },
+      (error, stdout) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolvePromise(String(stdout).trim());
+      },
+    );
+  });
+}
+
+async function resolveGitRoot(
+  directory: string,
+  isolateWorktrees: boolean,
+): Promise<string | null> {
   try {
     if (isolateWorktrees) {
-      const gitRoot = execSync("git rev-parse --show-toplevel", {
-        cwd: directory,
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-      }).trim();
+      const gitRoot = await runGit(["rev-parse", "--show-toplevel"], directory);
       return gitRoot || null;
     }
 
-    const gitCommonDir = execSync("git rev-parse --git-common-dir", {
-      cwd: directory,
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
+    const gitCommonDir = await runGit(
+      ["rev-parse", "--git-common-dir"],
+      directory,
+    );
 
     if (gitCommonDir === ".git") {
-      const gitRoot = execSync("git rev-parse --show-toplevel", {
-        cwd: directory,
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-      }).trim();
+      const gitRoot = await runGit(["rev-parse", "--show-toplevel"], directory);
       return gitRoot || null;
     }
 
@@ -47,30 +91,10 @@ function getGitRoot(directory: string): string | null {
       return dirname(resolved);
     }
 
-    const gitRoot = execSync("git rev-parse --show-toplevel", {
-      cwd: directory,
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
+    const gitRoot = await runGit(["rev-parse", "--show-toplevel"], directory);
     return gitRoot || null;
-  } catch {
-    return null;
-  }
-}
-
-function getProjectBasePath(directory: string): string {
-  return getGitRoot(directory) || resolve(directory);
-}
-
-function getGitEmail(directory: string): string | null {
-  try {
-    const email = execSync("git config user.email", {
-      cwd: getProjectBasePath(directory),
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
-    return email || null;
-  } catch {
+  } catch (error) {
+    if (isGitCancellation(error)) throw error;
     return null;
   }
 }
@@ -108,19 +132,18 @@ export function normalizeGitRemote(remoteUrl: string): string | null {
     .toLowerCase();
 }
 
-function getGitRepoInfo(directory: string): {
+async function resolveRepoInfo(directory: string): Promise<{
   name: string | null;
   normalizedRemote: string | null;
-} {
+}> {
   const cached = repoInfoCache.get(directory);
   if (cached) return cached;
 
   try {
-    const remoteUrl = execSync("git remote get-url origin", {
-      cwd: directory,
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
+    const remoteUrl = await runGit(
+      ["remote", "get-url", "origin"],
+      directory,
+    );
     const normalizedRemote = normalizeGitRemote(remoteUrl);
     const displayRemote = remoteUrl.replace(/\/+$/, "").replace(/\.git$/i, "");
     const separator = Math.max(
@@ -133,24 +156,46 @@ function getGitRepoInfo(directory: string): {
     };
     repoInfoCache.set(directory, result);
     return result;
-  } catch {
+  } catch (error) {
+    if (isGitCancellation(error)) throw error;
     const result = { name: null, normalizedRemote: null };
     repoInfoCache.set(directory, result);
     return result;
   }
 }
 
-function getGitRepoName(directory: string): string | null {
-  return getGitRepoInfo(directory).name;
+async function resolveGitEmail(directory: string): Promise<string | null> {
+  try {
+    const email = await runGit(["config", "user.email"], directory);
+    return email || null;
+  } catch (error) {
+    if (isGitCancellation(error)) throw error;
+    return null;
+  }
 }
 
-function loadClaudeProjectConfig(directory: string): {
+async function resolveGitMetadata(directory: string): Promise<GitMetadata> {
+  const isolateWorktrees = isIsolateWorktrees();
+  const basePath =
+    (await resolveGitRoot(directory, isolateWorktrees)) || resolve(directory);
+  const repoInfo = await resolveRepoInfo(basePath);
+  const email = await resolveGitEmail(basePath);
+  return {
+    basePath,
+    repoName: repoInfo.name,
+    normalizedRemote: repoInfo.normalizedRemote,
+    email,
+    isolateWorktrees,
+  };
+}
+
+function loadClaudeProjectConfig(basePath: string): {
   personalContainerTag?: string;
   repoContainerTag?: string;
 } | null {
   try {
     const configPath = join(
-      getProjectBasePath(directory),
+      basePath,
       ".claude",
       ".supermemory-claude",
       "config.json",
@@ -249,57 +294,50 @@ export function sanitizeRepoName(name: string): string {
   return sanitized.slice(0, 95).replace(/_+$/g, "") || "unknown";
 }
 
-export function getProjectIdentity(directory: string): string {
-  const basePath = getProjectBasePath(directory);
-  const { normalizedRemote } = getGitRepoInfo(basePath);
-  const isolateWorktrees = process.env.SUPERMEMORY_ISOLATE_WORKTREES === "true";
-  let localIdentity = basePath;
+function repoName(meta: GitMetadata): string {
+  return meta.repoName || basename(meta.basePath) || "unknown";
+}
+
+function projectIdentity(meta: GitMetadata): string {
+  let localIdentity = meta.basePath;
   try {
-    localIdentity = realpathSync.native(basePath);
+    localIdentity = realpathSync.native(meta.basePath);
   } catch {}
   return sha256(
-    !isolateWorktrees && normalizedRemote
-      ? normalizedRemote
+    !meta.isolateWorktrees && meta.normalizedRemote
+      ? meta.normalizedRemote
       : `path:${localIdentity}`,
   );
 }
 
-export function getGeneratedProjectTag(directory: string): string {
-  const basePath = getProjectBasePath(directory);
-  const repoName = getGitRepoName(basePath) || basename(basePath) || "unknown";
-  const shortName = sanitizeRepoName(repoName).slice(0, 72).replace(/_+$/g, "");
-  return `repo_${shortName || "unknown"}__${getProjectIdentity(directory)}`;
+function generatedProjectTag(meta: GitMetadata): string {
+  const shortName = sanitizeRepoName(repoName(meta))
+    .slice(0, 72)
+    .replace(/_+$/g, "");
+  return `repo_${shortName || "unknown"}__${projectIdentity(meta)}`;
 }
 
-export function getLegacyGeneratedProjectTag(directory: string): string {
-  const basePath = getProjectBasePath(directory);
-  const repoName = getGitRepoName(basePath) || basename(basePath) || "unknown";
-  return `repo_${sanitizeRepoName(repoName)}`;
+function legacyGeneratedProjectTag(meta: GitMetadata): string {
+  return `repo_${sanitizeRepoName(repoName(meta))}`;
 }
 
-export function getProjectTag(directory: string): string {
+function projectTag(directory: string, meta: GitMetadata): string {
   return (
-    loadClaudeProjectConfig(directory)?.repoContainerTag ||
+    loadClaudeProjectConfig(meta.basePath)?.repoContainerTag ||
     process.env.SUPERMEMORY_REPO_TAG ||
     loadLegacyCursorConfig(directory).repoContainerTag ||
     CONFIG.projectContainerTag ||
     loadCodexConfig()?.projectContainerTag ||
-    getGeneratedProjectTag(directory)
+    generatedProjectTag(meta)
   );
 }
 
-export function getUserTag(directory = process.cwd()): string {
-  return getProjectTag(directory);
-}
-
-export function getProjectName(directory: string): string {
-  const basePath = getProjectBasePath(directory);
-  return getGitRepoName(basePath) || basename(basePath) || "unknown";
-}
-
-function getLegacyClaudePersonalTags(directory: string): string[] {
-  const projectHash = sha256(getProjectBasePath(directory));
-  const claudeConfig = loadClaudeProjectConfig(directory);
+function legacyClaudePersonalTags(
+  directory: string,
+  meta: GitMetadata,
+): string[] {
+  const projectHash = sha256(meta.basePath);
+  const claudeConfig = loadClaudeProjectConfig(meta.basePath);
   return uniqueTags([
     claudeConfig?.personalContainerTag,
     `user_project_${projectHash}`,
@@ -307,13 +345,10 @@ function getLegacyClaudePersonalTags(directory: string): string[] {
   ]);
 }
 
-function getLegacyCodexUserTags(directory: string): string[] {
+function legacyCodexUserTags(meta: GitMetadata): string[] {
   const config = loadCodexConfig();
   const identity =
-    getGitEmail(directory) ||
-    process.env.USER ||
-    process.env.USERNAME ||
-    hostname();
+    meta.email || process.env.USER || process.env.USERNAME || hostname();
   const hash = sha256(identity);
   return uniqueTags([
     config?.userContainerTag,
@@ -322,9 +357,9 @@ function getLegacyCodexUserTags(directory: string): string[] {
   ]);
 }
 
-function getLegacyCodexProjectTags(directory: string): string[] {
+function legacyCodexProjectTags(meta: GitMetadata): string[] {
   const config = loadCodexConfig();
-  const projectHash = sha256(getProjectBasePath(directory));
+  const projectHash = sha256(meta.basePath);
   return uniqueTags([
     config?.projectContainerTag,
     `${config?.containerTagPrefix || "codex"}_project_${projectHash}`,
@@ -332,9 +367,9 @@ function getLegacyCodexProjectTags(directory: string): string[] {
   ]);
 }
 
-export function getLegacyOpenCodeUserTags(directory: string): string[] {
+function legacyOpenCodeUserTags(meta: GitMetadata): string[] {
   const identity =
-    getGitEmail(directory) ||
+    meta.email ||
     process.env.USER ||
     process.env.USERNAME ||
     "anonymous";
@@ -346,11 +381,14 @@ export function getLegacyOpenCodeUserTags(directory: string): string[] {
   ]);
 }
 
-export function getLegacyOpenCodeProjectTags(directory: string): string[] {
+function legacyOpenCodeProjectTags(
+  directory: string,
+  meta: GitMetadata,
+): string[] {
   const directoryHashes = uniqueTags([
     sha256(directory),
     sha256(resolve(directory)),
-    sha256(getProjectBasePath(directory)),
+    sha256(meta.basePath),
   ]);
   return uniqueTags([
     CONFIG.projectContainerTag,
@@ -361,23 +399,29 @@ export function getLegacyOpenCodeProjectTags(directory: string): string[] {
   ]);
 }
 
-export function getLegacyCursorUserTags(directory: string): string[] {
+function legacyCursorUserTags(
+  directory: string,
+  meta: GitMetadata,
+): string[] {
   const config = loadLegacyCursorConfig(directory);
   const identity =
     config.userContainerTag ||
     process.env.SUPERMEMORY_USER_TAG ||
     process.env.CURSOR_USER_EMAIL ||
-    getGitEmail(directory) ||
+    meta.email ||
     `${hostname()}_${userInfo().username}`;
   return [`cursor_user_${sha256(identity)}`];
 }
 
-export function getLegacyCursorProjectTags(directory: string): string[] {
+function legacyCursorProjectTags(
+  directory: string,
+  meta: GitMetadata,
+): string[] {
   const config = loadLegacyCursorConfig(directory);
   const identity =
     config.projectContainerTag ||
     process.env.SUPERMEMORY_PROJECT_TAG ||
-    getProjectBasePath(directory);
+    meta.basePath;
   return [`cursor_project_${sha256(identity)}`];
 }
 
@@ -392,32 +436,35 @@ function uniqueTags(tags: Array<string | null | undefined>): string[] {
   ];
 }
 
-export function getPersonalReadTags(directory: string): string[] {
+function personalReadTags(
+  directory: string,
+  meta: GitMetadata,
+  canonical: string,
+  generated: string,
+): string[] {
   return uniqueTags([
-    getProjectTag(directory),
-    getGeneratedProjectTag(directory),
-    ...getLegacyClaudePersonalTags(directory),
-    ...getLegacyCodexUserTags(directory),
-    ...getLegacyOpenCodeUserTags(directory),
-    ...getLegacyCursorUserTags(directory),
+    canonical,
+    generated,
+    ...legacyClaudePersonalTags(directory, meta),
+    ...legacyCodexUserTags(meta),
+    ...legacyOpenCodeUserTags(meta),
+    ...legacyCursorUserTags(directory, meta),
   ]);
 }
 
-export function getProjectReadTags(directory: string): string[] {
+function projectReadTags(
+  directory: string,
+  meta: GitMetadata,
+  canonical: string,
+  generated: string,
+): string[] {
   return uniqueTags([
-    getProjectTag(directory),
-    getGeneratedProjectTag(directory),
-    getLegacyGeneratedProjectTag(directory),
-    ...getLegacyCodexProjectTags(directory),
-    ...getLegacyOpenCodeProjectTags(directory),
-    ...getLegacyCursorProjectTags(directory),
-  ]);
-}
-
-export function getAllReadTags(directory: string): string[] {
-  return uniqueTags([
-    ...getPersonalReadTags(directory),
-    ...getProjectReadTags(directory),
+    canonical,
+    generated,
+    legacyGeneratedProjectTag(meta),
+    ...legacyCodexProjectTags(meta),
+    ...legacyOpenCodeProjectTags(directory, meta),
+    ...legacyCursorProjectTags(directory, meta),
   ]);
 }
 
@@ -432,16 +479,20 @@ export interface ResolvedTags {
   allReads: string[];
 }
 
-export function getTags(directory: string): ResolvedTags {
-  const canonical = getProjectTag(directory);
+export async function getTags(directory: string): Promise<ResolvedTags> {
+  const meta = await resolveGitMetadata(directory);
+  const canonical = projectTag(directory, meta);
+  const generated = generatedProjectTag(meta);
+  const personalReads = personalReadTags(directory, meta, canonical, generated);
+  const projectReads = projectReadTags(directory, meta, canonical, generated);
   return {
     canonical,
     user: canonical,
     project: canonical,
-    projectId: getProjectIdentity(directory),
-    projectName: getProjectName(directory),
-    personalReads: getPersonalReadTags(directory),
-    projectReads: getProjectReadTags(directory),
-    allReads: getAllReadTags(directory),
+    projectId: projectIdentity(meta),
+    projectName: repoName(meta),
+    personalReads,
+    projectReads,
+    allReads: uniqueTags([...personalReads, ...projectReads]),
   };
 }

@@ -138,6 +138,7 @@ interface Harness {
 
 function harness(
   config: Partial<V2RuntimeDependencies["config"]> = {},
+  resolveTags: V2RuntimeDependencies["resolveTags"] = async () => tags,
 ): Harness {
   const tools = new Map<string, FakeTool>();
   const hooks: Harness["hooks"] = {};
@@ -263,7 +264,7 @@ function harness(
     },
     memoryClient: memoryClient as unknown as V2RuntimeDependencies["memoryClient"],
     executeTool: executeSupermemoryTool,
-    resolveTags: () => tags,
+    resolveTags,
     logger: () => undefined,
     checkUpdate: async () => ({
       currentVersion: "2.0.15",
@@ -461,6 +462,68 @@ describe("OpenCode 2 runtime", () => {
       },
     });
     expect(h.emitted.map((event) => event.kind)).toEqual(["recalling", "recalled"]);
+    h.runtime.cleanup();
+  });
+
+  test("shares one tag resolution per session and caches success", async () => {
+    let calls = 0;
+    let release: (() => void) | null = null;
+    const h = harness({}, async () => {
+      calls++;
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return tags;
+    });
+    await h.runtime.register();
+
+    const first = h.runtime.handleContext({
+      sessionID: "s1",
+      messages: [request("a", "alpha prompt about caching")],
+    });
+    const second = h.runtime.handleContext({
+      sessionID: "s1",
+      messages: [request("b", "beta prompt about deploy")],
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls).toBe(1);
+
+    release!();
+    await Promise.all([first, second]);
+    expect(h.queries.length).toBeGreaterThan(0);
+
+    await h.runtime.handleContext({
+      sessionID: "s1",
+      messages: [request("c", "gamma prompt about testing")],
+    });
+    expect(calls).toBe(1);
+    h.runtime.cleanup();
+  });
+
+  test("clears in-flight tag resolution after rejection so the next attempt retries", async () => {
+    let calls = 0;
+    let fail = true;
+    const h = harness({}, async () => {
+      calls++;
+      if (fail) throw new Error("tag resolution failed");
+      return tags;
+    });
+    await h.runtime.register();
+
+    await h.runtime.handleContext({
+      sessionID: "s1",
+      messages: [request("a", "alpha prompt about caching")],
+    });
+    expect(calls).toBe(1);
+    expect(h.queries).toHaveLength(0);
+
+    fail = false;
+    await h.runtime.handleContext({
+      sessionID: "s1",
+      messages: [request("b", "beta prompt about deploy")],
+    });
+    expect(calls).toBe(2);
+    expect(h.queries.length).toBeGreaterThan(0);
     h.runtime.cleanup();
   });
 });
