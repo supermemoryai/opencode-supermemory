@@ -2,26 +2,40 @@ import type { Plugin, PluginInput } from "@opencode-ai/plugin";
 import type { Part, Permission } from "@opencode-ai/sdk";
 import { tool } from "@opencode-ai/plugin";
 
-import { AGENT_ENTITY_CONTEXT } from "./services/entity-context.js";
 import { supermemoryClient } from "./services/client.js";
-import { formatContextForPrompt } from "./services/context.js";
+import {
+  formatContextForPrompt,
+  getInjectedProfileFactTexts,
+} from "./services/context.js";
 import { createCaptureHook } from "./services/capture.js";
-import { buildRecallDirective } from "./services/recall.js";
+import {
+  buildDirectRecallResult,
+  buildRecallDirective,
+  DIRECT_RECALL_TIMEOUT_MS,
+  RecallSessionCache,
+} from "./services/recall.js";
+import { createMemoryActivityReporter } from "./services/activity.js";
+import {
+  executeSupermemoryTool,
+  MEMORY_TOOL_MODES,
+  MEMORY_TOOL_SCOPES,
+  MEMORY_TOOL_TYPES,
+  SUPERMEMORY_TOOL_DESCRIPTION,
+  type SupermemoryToolArgs,
+} from "./services/memory-tool.js";
 import { getTags } from "./services/tags.js";
-import { stripPrivateContent, isFullyPrivate } from "./services/privacy.js";
 import { createCompactionHook, type CompactionContext } from "./services/compaction.js";
 
 import { isConfigured, CONFIG, PLUGIN_VERSION } from "./config.js";
 import { log } from "./services/logger.js";
-import { checkNpmUpdate, formatUpdateNotice } from "./services/version-check.js";
-import type { MemoryScope, MemoryType } from "./types/index.js";
+import { checkNpmUpdate } from "./services/version-check.js";
 
 const CODE_BLOCK_PATTERN = /```[\s\S]*?```/g;
 const INLINE_CODE_PATTERN = /`[^`]+`/g;
 
 const MEMORY_KEYWORD_PATTERN = new RegExp(`\\b(${CONFIG.keywordPatterns.join("|")})\\b`, "i");
 
-const MEMORY_NUDGE_MESSAGE = `[MEMORY TRIGGER DETECTED]
+export const MEMORY_NUDGE_MESSAGE = `[MEMORY TRIGGER DETECTED]
 The user wants you to remember something. You MUST use the \`supermemory\` tool with \`mode: "add"\` to save this information.
 
 Extract the key information the user wants remembered and save it as a concise, searchable memory.
@@ -30,7 +44,7 @@ Extract the key information the user wants remembered and save it as a concise, 
 - Choose an appropriate \`type\`: "preference", "project-config", "learned-pattern", etc.
 
 DO NOT skip this step. The user explicitly asked you to remember.`;
-const UPDATE_COMMAND = "bunx opencode-supermemory@latest install";
+export const UPDATE_COMMAND = "bunx opencode-supermemory@latest install";
 
 function removeCodeBlocks(text: string): string {
   return text.replace(CODE_BLOCK_PATTERN, "").replace(INLINE_CODE_PATTERN, "");
@@ -39,10 +53,6 @@ function removeCodeBlocks(text: string): string {
 function detectMemoryKeyword(text: string): boolean {
   const textWithoutCode = removeCodeBlocks(text);
   return MEMORY_KEYWORD_PATTERN.test(textWithoutCode);
-}
-
-function combineContextParts(parts: Array<string | null | undefined>): string {
-  return parts.map((part) => part?.trim()).filter(Boolean).join("\n\n");
 }
 
 function isSupermemoryRecallSearch(input: Permission): boolean {
@@ -63,10 +73,16 @@ function isSupermemoryRecallSearch(input: Permission): boolean {
   return String(args.mode ?? "") === "search";
 }
 
+/**
+ * OpenCode V1 plugin. OpenCode 2 loads the `opencode-supermemory/server`
+ * entry instead; both share the services under `src/services`.
+ */
 export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
   const { directory } = ctx;
   const tags = getTags(directory);
   const injectedSessions = new Set<string>();
+  const recallSessions = new RecallSessionCache();
+  const activity = createMemoryActivityReporter(ctx.client);
   log("Plugin init", { directory, tags, configured: isConfigured() });
 
   if (!isConfigured()) {
@@ -74,10 +90,12 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
   }
 
   const compactionHook = isConfigured() && ctx.client && CONFIG.compactionEnabled
-    ? createCompactionHook(ctx as CompactionContext, tags)
+    ? createCompactionHook(ctx as CompactionContext, tags, {
+        onSaved: () => activity.saved(),
+      })
     : null;
   const captureHook = isConfigured() && ctx.client
-    ? createCaptureHook(ctx, tags)
+    ? createCaptureHook(ctx, tags, { onSaved: () => activity.saved() })
     : null;
 
   return {
@@ -128,103 +146,128 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
           output.parts.push(nudgePart);
         }
 
-        const recallPart: Part = {
-          id: `prt_supermemory-recall-${Date.now()}`,
-          sessionID: input.sessionID,
-          messageID: output.message.id,
-          type: "text",
-          text: buildRecallDirective(),
-          synthetic: true,
-        };
-        output.parts.push(recallPart);
-
         const isFirstMessage = !injectedSessions.has(input.sessionID);
+        if (isFirstMessage) injectedSessions.add(input.sessionID);
 
-        if (isFirstMessage) {
-          injectedSessions.add(input.sessionID);
-
-          let memoryContext = "";
-          const updateCheck = checkNpmUpdate(
-            "opencode-supermemory",
-            PLUGIN_VERSION,
-            UPDATE_COMMAND
-          ).then((info) => (info ? formatUpdateNotice(info) : null));
-
-          if (CONFIG.autoRecallEveryPrompt) {
-            const [profileResult, userMemoriesResult, projectMemoriesListResult] = await Promise.all([
-              supermemoryClient.getProfileScoped(
-                tags.canonical,
-                tags.personalReads,
-                "personal",
-                userMessage,
-              ),
-              supermemoryClient.searchMemoriesScoped(
-                userMessage,
-                tags.canonical,
-                tags.personalReads,
-                "personal",
-              ),
-              supermemoryClient.listMemoriesScoped(
-                tags.canonical,
-                tags.projectReads,
-                "project",
-                CONFIG.maxProjectMemories,
-              ),
-            ]);
-
-            const profile = profileResult.success ? profileResult : null;
-            const userMemories = userMemoriesResult.success ? userMemoriesResult : { results: [] };
-            const projectMemoriesList = projectMemoriesListResult.success ? projectMemoriesListResult : { memories: [] };
-
-            const projectMemories = {
-              results: (projectMemoriesList.memories || []).map((m: any) => ({
-                id: m.id,
-                memory: m.summary || m.content || m.title || "",
-                similarity: 1,
-                title: m.title,
-                metadata: m.metadata,
-              })),
-              total: projectMemoriesList.memories?.length || 0,
-              timing: 0,
-            };
-
-            memoryContext = formatContextForPrompt(
-              profile,
-              userMemories,
-              projectMemories
-            );
-          } else {
-            const profileResult = await supermemoryClient.getProfileScoped(
-              tags.canonical,
-              tags.personalReads,
-              "personal",
-            );
-            const profile = profileResult.success ? profileResult : null;
-            memoryContext = formatContextForPrompt(profile, { results: [] }, { results: [] });
-          }
-
-          const updateNotice = await updateCheck;
-          const firstMessageContext = combineContextParts([memoryContext, updateNotice]);
-
-          if (firstMessageContext) {
-            const contextPart: Part = {
-              id: `prt_supermemory-context-${Date.now()}`,
-              sessionID: input.sessionID,
-              messageID: output.message.id,
-              type: "text",
-              text: firstMessageContext,
-              synthetic: true,
-            };
-
-            output.parts.unshift(contextPart);
-
-            const duration = Date.now() - start;
-            log("chat.message: context injected", {
-              duration,
-              contextLength: firstMessageContext.length,
-            });
-          }
+        if (CONFIG.recallMode === "advisory") {
+          output.parts.push({
+            id: `prt_supermemory-recall-${Date.now()}`,
+            sessionID: input.sessionID,
+            messageID: output.message.id,
+            type: "text",
+            text: buildRecallDirective(),
+            synthetic: true,
+          });
         }
+
+        const profileRequest =
+          isFirstMessage && CONFIG.recallMode !== "off" && CONFIG.injectProfile
+            ? supermemoryClient.getProfileScoped(
+                tags.canonical,
+                tags.personalReads,
+                "personal",
+                undefined,
+                { timeoutMs: DIRECT_RECALL_TIMEOUT_MS },
+              )
+            : Promise.resolve(null);
+
+        const directRecallPromise =
+          CONFIG.recallMode === "direct"
+            ? buildDirectRecallResult({
+                prompt: userMessage,
+                sessionID: input.sessionID,
+                cache: recallSessions,
+                search: (query) =>
+                  supermemoryClient.searchMemoriesForRecall(
+                    query,
+                    tags.canonical,
+                    tags.personalReads,
+                    tags.projectReads,
+                    { timeoutMs: DIRECT_RECALL_TIMEOUT_MS },
+                  ),
+                suppressTexts: isFirstMessage
+                  ? profileRequest.then((result) =>
+                      result?.success && result.profile
+                        ? getInjectedProfileFactTexts(result)
+                        : [],
+                    )
+                  : undefined,
+              })
+            : Promise.resolve({
+                context: "",
+                status: "skipped" as const,
+                count: 0,
+                tokens: 0,
+              });
+
+        const firstMessage = isFirstMessage
+          ? profileRequest.then((profileResult) => {
+              const profile = profileResult?.success ? profileResult : null;
+              return profile
+                ? formatContextForPrompt(
+                    profile,
+                    { results: [] },
+                    { results: [] },
+                  )
+                : "";
+            })
+          : Promise.resolve("");
+
+        const updateCheck = isFirstMessage
+          ? checkNpmUpdate(
+              "opencode-supermemory",
+              PLUGIN_VERSION,
+              UPDATE_COMMAND,
+            )
+          : Promise.resolve(null);
+
+        const [directRecall, firstMessageContext, updateInfo] = await Promise.all([
+          directRecallPromise,
+          firstMessage,
+          updateCheck,
+        ]);
+
+        if (directRecall.status === "recalled") {
+          activity.recalled(directRecall.count, directRecall.tokens);
+        } else if (directRecall.status === "unavailable") {
+          activity.recallUnavailable();
+        }
+        if (updateInfo) activity.updateAvailable(updateInfo);
+
+        if (firstMessageContext) {
+          output.parts.unshift({
+            id: `prt_supermemory-context-${Date.now()}`,
+            sessionID: input.sessionID,
+            messageID: output.message.id,
+            type: "text",
+            text: firstMessageContext,
+            synthetic: true,
+          });
+        }
+
+        if (directRecall.context) {
+          output.parts.push({
+            id: `prt_supermemory-direct-recall-${Date.now()}`,
+            sessionID: input.sessionID,
+            messageID: output.message.id,
+            type: "text",
+            text: directRecall.context,
+            synthetic: true,
+            metadata: {
+              supermemory: {
+                activity: "recalled",
+                count: directRecall.count,
+                tokens: directRecall.tokens,
+              },
+            },
+          });
+        }
+
+        log("chat.message: context processed", {
+          duration: Date.now() - start,
+          firstMessageContextLength: firstMessageContext.length,
+          directRecallContextLength: directRecall.context.length,
+        });
 
       } catch (error) {
         log("chat.message: ERROR", { error: String(error) });
@@ -233,310 +276,20 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
 
     tool: {
       supermemory: tool({
-        description:
-          "Manage and query the Supermemory persistent memory system. Use 'search' to find relevant memories, 'add' to store new knowledge, 'profile' to view user profile, 'list' to see recent memories, 'forget' to remove a memory.",
+        description: SUPERMEMORY_TOOL_DESCRIPTION,
         args: {
-          mode: tool.schema
-            .enum(["add", "search", "profile", "list", "forget", "help"])
-            .optional(),
+          mode: tool.schema.enum(MEMORY_TOOL_MODES).optional(),
           content: tool.schema.string().optional(),
           query: tool.schema.string().optional(),
-          type: tool.schema
-            .enum([
-              "project-config",
-              "architecture",
-              "error-solution",
-              "preference",
-              "learned-pattern",
-              "conversation",
-            ])
-            .optional(),
-          scope: tool.schema.enum(["user", "project"]).optional(),
+          type: tool.schema.enum(MEMORY_TOOL_TYPES).optional(),
+          scope: tool.schema.enum(MEMORY_TOOL_SCOPES).optional(),
           memoryId: tool.schema.string().optional(),
           limit: tool.schema.number().optional(),
         },
-        async execute(args: {
-          mode?: string;
-          content?: string;
-          query?: string;
-          type?: MemoryType;
-          scope?: MemoryScope;
-          memoryId?: string;
-          limit?: number;
-        }) {
-          if (!isConfigured()) {
-            return JSON.stringify({
-              success: false,
-              error:
-                "SUPERMEMORY_API_KEY not set. Set it in your environment to use Supermemory.",
-            });
-          }
-
-          const mode = args.mode || "help";
-
-          try {
-            switch (mode) {
-              case "help": {
-                return JSON.stringify({
-                  success: true,
-                  message: "Supermemory Usage Guide",
-                  commands: [
-                    {
-                      command: "add",
-                      description: "Store a new memory",
-                      args: ["content", "type?", "scope?"],
-                    },
-                    {
-                      command: "search",
-                      description: "Search memories",
-                      args: ["query", "scope?"],
-                    },
-                    {
-                      command: "profile",
-                      description: "View user profile",
-                      args: ["query?"],
-                    },
-                    {
-                      command: "list",
-                      description: "List recent memories",
-                      args: ["scope?", "limit?"],
-                    },
-                    {
-                      command: "forget",
-                      description: "Remove a memory",
-                      args: ["memoryId", "scope?"],
-                    },
-                  ],
-                  scopes: {
-                    user: "Personal preferences and knowledge for this project",
-                    project: "Project-specific knowledge (default)",
-                  },
-                  types: [
-                    "project-config",
-                    "architecture",
-                    "error-solution",
-                    "preference",
-                    "learned-pattern",
-                    "conversation",
-                  ],
-                });
-              }
-
-              case "add": {
-                if (!args.content) {
-                  return JSON.stringify({
-                    success: false,
-                    error: "content parameter is required for add mode",
-                  });
-                }
-
-                const sanitizedContent = stripPrivateContent(args.content);
-                if (isFullyPrivate(args.content)) {
-                  return JSON.stringify({
-                    success: false,
-                    error: "Cannot store fully private content",
-                  });
-                }
-
-                const scope = args.scope || "project";
-                const internalScope =
-                  scope === "user" ? "personal" : "project";
-
-                const result = await supermemoryClient.addMemory(
-                  sanitizedContent,
-                  tags.canonical,
-                  {
-                    type: args.type,
-                    project: tags.projectName,
-                    sm_project_id: tags.projectId,
-                    sm_scope: internalScope,
-                    sm_capture_mode: "tool",
-                  },
-                  { entityContext: AGENT_ENTITY_CONTEXT }
-                );
-
-                if (!result.success) {
-                  return JSON.stringify({
-                    success: false,
-                    error: result.error || "Failed to add memory",
-                  });
-                }
-
-                return JSON.stringify({
-                  success: true,
-                  message: `Memory added to ${scope} scope`,
-                  id: result.id,
-                  scope,
-                  type: args.type,
-                });
-              }
-
-              case "search": {
-                if (!args.query) {
-                  return JSON.stringify({
-                    success: false,
-                    error: "query parameter is required for search mode",
-                  });
-                }
-
-                const scope = args.scope;
-
-                if (scope === "user") {
-                  const result = await supermemoryClient.searchMemoriesScoped(
-                    args.query,
-                    tags.canonical,
-                    tags.personalReads,
-                    "personal",
-                  );
-                  if (!result.success) {
-                    return JSON.stringify({
-                      success: false,
-                      error: result.error || "Failed to search memories",
-                    });
-                  }
-                  return formatSearchResults(args.query, scope, result, args.limit);
-                }
-
-                if (scope === "project") {
-                  const result = await supermemoryClient.searchMemoriesScoped(
-                    args.query,
-                    tags.canonical,
-                    tags.projectReads,
-                    "project",
-                  );
-                  if (!result.success) {
-                    return JSON.stringify({
-                      success: false,
-                      error: result.error || "Failed to search memories",
-                    });
-                  }
-                  return formatSearchResults(args.query, scope, result, args.limit);
-                }
-
-                const result = await supermemoryClient.searchMemoriesMany(
-                  args.query,
-                  tags.allReads,
-                );
-                if (!result.success) {
-                  return JSON.stringify({
-                    success: false,
-                    error: result.error || "Failed to search memories",
-                  });
-                }
-                return formatSearchResults(
-                  args.query,
-                  undefined,
-                  result,
-                  args.limit,
-                );
-              }
-
-              case "profile": {
-                const result = await supermemoryClient.getProfileScoped(
-                  tags.canonical,
-                  tags.personalReads,
-                  "personal",
-                  args.query,
-                );
-
-                if (!result.success) {
-                  return JSON.stringify({
-                    success: false,
-                    error: result.error || "Failed to fetch profile",
-                  });
-                }
-
-                return JSON.stringify({
-                  success: true,
-                  profile: {
-                    static: result.profile?.static || [],
-                    dynamic: result.profile?.dynamic || [],
-                  },
-                });
-              }
-
-              case "list": {
-                const scope = args.scope || "project";
-                const limit = args.limit || 20;
-                const internalScope =
-                  scope === "user" ? "personal" : "project";
-                const readTags =
-                  scope === "user" ? tags.personalReads : tags.projectReads;
-
-                const result = await supermemoryClient.listMemoriesScoped(
-                  tags.canonical,
-                  readTags,
-                  internalScope,
-                  limit,
-                );
-
-                if (!result.success) {
-                  return JSON.stringify({
-                    success: false,
-                    error: result.error || "Failed to list memories",
-                  });
-                }
-
-                const memories = result.memories || [];
-                return JSON.stringify({
-                  success: true,
-                  scope,
-                  count: memories.length,
-                  memories: memories.map((m) => ({
-                    id: m.id,
-                    content: m.summary,
-                    createdAt: m.createdAt,
-                    metadata: m.metadata,
-                  })),
-                });
-              }
-
-              case "forget": {
-                if (!args.memoryId) {
-                  return JSON.stringify({
-                    success: false,
-                    error: "memoryId parameter is required for forget mode",
-                  });
-                }
-
-                const scope = args.scope || "project";
-                const readTags =
-                  scope === "user"
-                    ? tags.personalReads
-                    : scope === "project"
-                      ? tags.projectReads
-                      : tags.allReads;
-
-                const result = await supermemoryClient.deleteMemory(
-                  args.memoryId,
-                  [tags.canonical, ...readTags],
-                );
-
-                if (!result.success) {
-                  return JSON.stringify({
-                    success: false,
-                    error: result.error || "Failed to delete memory",
-                  });
-                }
-
-                return JSON.stringify({
-                  success: true,
-                  message: `Memory ${args.memoryId} removed from ${scope} scope`,
-                });
-              }
-
-              default:
-                return JSON.stringify({
-                  success: false,
-                  error: `Unknown mode: ${mode}`,
-                });
-            }
-          } catch (error) {
-            return JSON.stringify({
-              success: false,
-              error: error instanceof Error ? error.message : String(error),
-            });
-          }
+        async execute(args: SupermemoryToolArgs) {
+          return executeSupermemoryTool(args, tags, {
+            onSaved: () => activity.saved(),
+          });
         },
       }),
     },
@@ -553,38 +306,61 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
       }
     },
 
+    "tool.execute.before": async (input, output) => {
+      if (input.tool !== "supermemory") return;
+      const args = output.args as { mode?: unknown; query?: unknown };
+      if (args.mode === "search") {
+        activity.recalling(
+          typeof args.query === "string" ? args.query : undefined,
+        );
+      }
+    },
+
+    "tool.execute.after": async (input, output) => {
+      if (input.tool !== "supermemory") return;
+      try {
+        const result = JSON.parse(output.output) as {
+          success?: boolean;
+          count?: number;
+          results?: unknown[];
+        };
+        if (!result.success) return;
+        const count = result.count ?? result.results?.length;
+        if (typeof count === "number" && count > 0) {
+          activity.recalled(count, Math.round(output.output.length / 4));
+        }
+      } catch {
+        // Tool output remains authoritative when it is not structured JSON.
+      }
+    },
+
     event: async (input: { event: { type: string; properties?: unknown } }) => {
+      const props = input.event.properties as Record<string, unknown> | undefined;
+      if (input.event.type === "session.deleted") {
+        const sessionID = (props?.info as { id?: string } | undefined)?.id;
+        if (sessionID) {
+          injectedSessions.delete(sessionID);
+          recallSessions.delete(sessionID);
+        }
+      } else if (input.event.type === "server.instance.disposed") {
+        injectedSessions.clear();
+        recallSessions.clear();
+      }
+
       if (compactionHook) {
         await compactionHook.event(input);
       }
       if (captureHook) {
-        await captureHook.event(input);
+        if (input.event.type === "session.idle") {
+          void captureHook.event(input).catch((error) => {
+            log("[capture] background idle capture failed", {
+              error: String(error),
+            });
+          });
+        } else {
+          await captureHook.event(input);
+        }
       }
     },
   };
 };
-
-function formatSearchResults(
-  query: string,
-  scope: string | undefined,
-  results: { results?: Array<{ id?: string; memory?: string; chunk?: string; similarity?: number }> },
-  limit?: number
-): string {
-  const memoryResults = results.results || [];
-  return JSON.stringify({
-    success: true,
-    query,
-    scope,
-    count: memoryResults.length,
-    results: memoryResults.slice(0, limit || 10).map((r) => {
-      const result = {
-        content: r.memory ?? r.chunk,
-        similarity: Math.round((r.similarity ?? 0) * 100),
-      };
-
-      return r.memory === undefined
-        ? { ...result, forgettable: false }
-        : { id: r.id, ...result, forgettable: true };
-    }),
-  });
-}

@@ -1,18 +1,24 @@
+import { createHash } from "node:crypto";
+
 import { AGENT_ENTITY_CONTEXT } from "./entity-context.js";
+import { AUTOMATIC_CAPTURE_TIMEOUT_MS } from "./capture.js";
+import {
+  COMPACTION_CONTEXT_MARKER,
+  createCompactionPrompt,
+  fitProjectMemories,
+} from "./compaction-prompt.js";
 import { supermemoryClient } from "./client.js";
 import { log } from "./logger.js";
 import { CONFIG } from "../config.js";
 import type { ResolvedTags } from "./tags.js";
 
-const COMPACTION_CONTEXT_MARKER = "[SUPERMEMORY COMPACTION CONTEXT]";
-const MAX_COMPACTION_MEMORY_CHARS = 12_000;
-const MAX_SINGLE_MEMORY_CHARS = 2_000;
+const MIN_SUMMARY_CHARS = 100;
 
 interface MessageInfo {
   id: string;
   role: string;
   sessionID: string;
-  summary?: boolean;
+  summary?: unknown;
   finish?: string | boolean;
   error?: unknown;
 }
@@ -35,7 +41,7 @@ interface CompactionMemoryClient {
     content: string,
     containerTag: string,
     metadata?: Record<string, unknown>,
-    options?: { customId?: string; entityContext?: string },
+    options?: { customId?: string; entityContext?: string; timeoutMs?: number },
   ) => Promise<{ success: boolean; id?: string; error?: string }>;
 }
 
@@ -53,70 +59,8 @@ export interface CompactionContext {
 
 export interface CompactionOptions {
   memoryClient?: CompactionMemoryClient;
-}
-
-export function fitProjectMemories(memories: string[]): string[] {
-  const result: string[] = [];
-  const seen = new Set<string>();
-  let remaining = MAX_COMPACTION_MEMORY_CHARS;
-
-  for (const rawMemory of memories) {
-    const normalized = rawMemory.trim();
-    if (!normalized || seen.has(normalized) || remaining <= 0) continue;
-    seen.add(normalized);
-
-    const memory = normalized.slice(
-      0,
-      Math.min(MAX_SINGLE_MEMORY_CHARS, remaining),
-    );
-    result.push(memory);
-    remaining -= memory.length;
-  }
-
-  return result;
-}
-
-export function createCompactionPrompt(projectMemories: string[]): string {
-  const memoriesSection =
-    projectMemories.length > 0
-      ? `
-## Project Knowledge (from Supermemory)
-The following project-specific knowledge should be preserved and referenced in the summary:
-${projectMemories.map((memory) => `- ${memory}`).join("\n")}
-`
-      : "";
-
-  return `${COMPACTION_CONTEXT_MARKER}
-
-When summarizing this session, you MUST include the following sections in your summary:
-
-## 1. User Requests (As-Is)
-- List all original user requests exactly as they were stated
-- Preserve the user's exact wording and intent
-
-## 2. Final Goal
-- What the user ultimately wanted to achieve
-- The end result or deliverable expected
-
-## 3. Work Completed
-- What has been done so far
-- Files created/modified
-- Features implemented
-- Problems solved
-
-## 4. Remaining Tasks
-- What still needs to be done
-- Pending items from the original request
-- Follow-up tasks identified during the work
-
-## 5. MUST NOT Do (Critical Constraints)
-- Things that were explicitly forbidden
-- Approaches that failed and should not be retried
-- User's explicit restrictions or preferences
-- Anti-patterns identified during the session
-${memoriesSection}
-This context is critical for maintaining continuity after compaction.
-`;
+  /** Called after a compaction summary is saved as a memory. */
+  onSaved?: () => void;
 }
 
 function getResponseMessages(
@@ -136,6 +80,25 @@ function getSummaryContent(message: SessionMessage): string {
     .trim();
 }
 
+function isFinishedSummary(info: MessageInfo | undefined): info is MessageInfo {
+  return Boolean(
+    info?.sessionID &&
+      info.role === "assistant" &&
+      info.summary === true &&
+      info.finish,
+  );
+}
+
+function isFailedSummary(info: MessageInfo): boolean {
+  return info.finish === "error" || Boolean(info.error);
+}
+
+/**
+ * OpenCode V1 compaction support. OpenCode decides when to compact, which
+ * model summarizes, and how the session continues. Supermemory adds bounded
+ * project memories to OpenCode's own compaction prompt and saves each
+ * successful summary as a memory.
+ */
 export function createCompactionHook(
   ctx: CompactionContext,
   tags: ResolvedTags,
@@ -168,9 +131,10 @@ export function createCompactionHook(
 
   async function saveSummaryAsMemory(
     sessionID: string,
+    summaryID: string,
     summaryContent: string,
   ): Promise<boolean> {
-    if (summaryContent.length < 100) {
+    if (summaryContent.length < MIN_SUMMARY_CHARS) {
       log("[compaction] summary too short to save", {
         sessionID,
         length: summaryContent.length,
@@ -190,7 +154,12 @@ export function createCompactionHook(
           sm_capture_mode: "compaction",
           sessionId: sessionID,
         },
-        { entityContext: AGENT_ENTITY_CONTEXT },
+        {
+          // A stable id per summary makes a repeated save of the same summary a no-op.
+          customId: `opencode:compaction:${createHash("sha256").update(`${sessionID}:${summaryID}`).digest("hex")}`,
+          entityContext: AGENT_ENTITY_CONTEXT,
+          timeoutMs: AUTOMATIC_CAPTURE_TIMEOUT_MS,
+        },
       );
 
       if (result.success) {
@@ -198,6 +167,7 @@ export function createCompactionHook(
           sessionID,
           memoryId: result.id,
         });
+        options?.onSaved?.();
         return true;
       }
 
@@ -226,14 +196,8 @@ export function createCompactionHook(
         path: { id: sessionID },
         query: { directory: ctx.directory },
       });
-      const messages = getResponseMessages(response);
-      const summaries = messages.filter(
-        (message) =>
-          message.info.role === "assistant" &&
-          message.info.summary === true &&
-          Boolean(message.info.finish) &&
-          message.info.finish !== "error" &&
-          !message.info.error,
+      const summaries = getResponseMessages(response).filter(
+        (message) => isFinishedSummary(message.info) && !isFailedSummary(message.info),
       );
       const summary = expectedSummaryID
         ? summaries.find((message) => message.info.id === expectedSummaryID)
@@ -243,11 +207,7 @@ export function createCompactionHook(
         log("[compaction] summary message not available yet", { sessionID });
         return;
       }
-
-      const alreadyCaptured = capturedSummaryIDs
-        .get(sessionID)
-        ?.has(summary.info.id);
-      if (alreadyCaptured) return;
+      if (capturedSummaryIDs.get(sessionID)?.has(summary.info.id)) return;
 
       const summaryContent = getSummaryContent(summary);
       if (!summaryContent) {
@@ -258,7 +218,9 @@ export function createCompactionHook(
         return;
       }
 
-      if (!(await saveSummaryAsMemory(sessionID, summaryContent))) return;
+      if (!(await saveSummaryAsMemory(sessionID, summary.info.id, summaryContent))) {
+        return;
+      }
 
       const captured = capturedSummaryIDs.get(sessionID) ?? new Set<string>();
       captured.add(summary.info.id);
@@ -280,9 +242,8 @@ export function createCompactionHook(
 
       try {
         const projectMemories = await fetchProjectMemories();
-        const context = createCompactionPrompt(projectMemories);
         if (!output.context.some((item) => item.includes(COMPACTION_CONTEXT_MARKER))) {
-          output.context.push(context);
+          output.context.push(createCompactionPrompt(projectMemories));
         }
         log("[compaction] native context injected", {
           sessionID: input.sessionID,
@@ -298,40 +259,23 @@ export function createCompactionHook(
     },
 
     async event({ event }: { event: { type: string; properties?: unknown } }) {
-      const properties = event.properties as
-        | Record<string, unknown>
-        | undefined;
+      const properties = event.properties as Record<string, unknown> | undefined;
 
       if (event.type === "message.updated") {
         const info = properties?.info as MessageInfo | undefined;
-        if (
-          info?.sessionID &&
-          info.role === "assistant" &&
-          info.summary === true &&
-          Boolean(info.finish) &&
-          (info.finish === "error" || Boolean(info.error))
-        ) {
+        if (!isFinishedSummary(info)) return;
+        if (isFailedSummary(info)) {
           pendingSessions.delete(info.sessionID);
           log("[compaction] native compaction failed; summary not captured", {
             sessionID: info.sessionID,
           });
           return;
         }
-        if (
-          info?.sessionID &&
-          info.role === "assistant" &&
-          info.summary === true &&
-          Boolean(info.finish)
-        ) {
-          await captureSummary(info.sessionID, info.id);
-        }
+        await captureSummary(info.sessionID, info.id);
         return;
       }
 
-      if (
-        event.type === "session.compacted" ||
-        event.type === "session.idle"
-      ) {
+      if (event.type === "session.compacted" || event.type === "session.idle") {
         const sessionID = properties?.sessionID as string | undefined;
         if (sessionID && pendingSessions.has(sessionID)) {
           await captureSummary(sessionID);

@@ -1,52 +1,69 @@
+<div align="center">
+
 # opencode-supermemory
 
-OpenCode plugin for persistent memory using [Supermemory](https://supermemory.ai).
+**Persistent memory for OpenCode, powered by [Supermemory](https://supermemory.ai)**
 
-Your agent remembers what you tell it - across sessions, across projects.
+[![npm version](https://img.shields.io/npm/v/opencode-supermemory?color=9C5C10&label=npm)](https://www.npmjs.com/package/opencode-supermemory)
+[![license](https://img.shields.io/badge/license-MIT-9C5C10)](#license)
+[![OpenCode](https://img.shields.io/badge/OpenCode-plugin-9C5C10)](https://github.com/supermemoryai/opencode-supermemory)
+
+</div>
+
+OpenCode plugin for persistent memory using [Supermemory](https://supermemory.ai). Your
+agent remembers what you tell it, across sessions and across projects.
+
+One package supports both OpenCode generations: OpenCode V1 loads the root entry from
+the `plugin` array, and OpenCode 2 loads `opencode-supermemory/server` (plus a small TUI
+companion for notices) from the `plugins` array. See [OpenCode 2](#opencode-2).
+
+<div align="center">
+
+[Installation](#installation) · [OpenCode 2](#opencode-2) · [Features](#features) · [Tool usage](#tool-usage) · [Memory scoping](#memory-scoping) · [Configuration](#configuration) · [License](#license)
+
+</div>
+
+---
 
 ## Installation
 
-### For Humans
-
 ```bash
 bunx opencode-supermemory@latest install
+bunx opencode-supermemory@latest login     # or set SUPERMEMORY_API_KEY
+bunx opencode-supermemory@latest status    # check the connection any time
 ```
 
-Then authenticate with Supermemory:
-
-```bash
-bunx opencode-supermemory@latest login
-```
-
-Check the connection any time:
-
-```bash
-bunx opencode-supermemory@latest status
-```
-
-**Or let your agent do it** - paste this into OpenCode:
+**Or let your agent do it:** paste this into OpenCode:
 
 ```
 Install opencode-supermemory by following https://raw.githubusercontent.com/supermemoryai/opencode-supermemory/main/README.md
 ```
 
-### For LLM Agents
+`install`, `login`, `logout`, and `status` are also available as in-chat commands
+(`/supermemory-init`, `/supermemory-login`, `/supermemory-logout`, `/supermemory-status`)
+once the plugin is registered.
 
 <details>
-<summary>Instructions for LLM Agents (click to expand)</summary>
+<summary>Instructions for LLM agents</summary>
+<br>
 
 If you're an LLM agent helping set up opencode-supermemory, follow these steps:
 
-#### Step 1: Run the installer
+**Step 1: Run the installer**
 
 ```bash
 bunx opencode-supermemory@latest install --no-tui
 ```
 
-This will:
+This registers the plugin in `~/.config/opencode/opencode.jsonc` for both OpenCode V1
+and OpenCode 2, and creates the `/supermemory-index` command. Add
+`--disable-context-recovery` if the user also has
+[Oh My OpenCode](#usage-with-oh-my-opencode) installed, to avoid its auto-compact hook
+fighting with this plugin's V1 compaction.
 
-- Register the plugin in `~/.config/opencode/opencode.jsonc`
-- Create the `/supermemory-init` command
+- Register the plugin in `~/.config/opencode/opencode.jsonc` (`plugin` for V1, `plugins`
+  for OpenCode 2, plus an `allow` rule for the read-only `supermemory_recall` tool)
+- Create the `/supermemory-index` command (`/supermemory-init` is an alias)
 
 #### Step 2: Verify the config
 
@@ -54,44 +71,35 @@ This will:
 cat ~/.config/opencode/opencode.jsonc
 ```
 
-Should contain:
-
-```json
-{
-  "plugin": ["opencode-supermemory"]
-}
-```
-
-If not, add it manually:
-
-**JSONC:**
+Should contain the entries below. The installer preserves comments and other settings and
+is safe to re-run; if anything is missing, add it manually:
 
 ```jsonc
 {
+  // OpenCode V1
   "plugin": [
-    "opencode-supermemory",
+    "opencode-supermemory@latest",
     // ... other plugins
+  ],
+  // OpenCode 2
+  "plugins": [
+    "opencode-supermemory",
+    // ... other OpenCode 2 plugins
+  ],
+  "permissions": [
+    { "action": "supermemory_recall", "resource": "*", "effect": "allow" },
   ],
 }
 ```
 
-**JSON:**
-
-```json
-{
-  "plugin": ["opencode-supermemory"]
-}
-```
-
-#### Step 3: Authenticate
-
-Run the browser authentication flow:
+**Step 3: Authenticate**
 
 ```bash
 bunx opencode-supermemory@latest login
 ```
 
-For headless environments, users can still set `SUPERMEMORY_API_KEY` manually or create `~/.config/opencode/supermemory.jsonc`:
+For headless environments, set `SUPERMEMORY_API_KEY` manually, or create
+`~/.config/opencode/supermemory.jsonc`:
 
 ```jsonc
 {
@@ -99,37 +107,28 @@ For headless environments, users can still set `SUPERMEMORY_API_KEY` manually or
 }
 ```
 
-#### Step 4: Verify setup
+**Step 4: Verify setup**
 
-Tell the user to restart OpenCode and run:
+Tell the user to restart OpenCode and run `bunx opencode-supermemory@latest status`. The
+status output lists whether the V1 and OpenCode 2 entries are registered. If it's not
+connected, check: the user is authenticated (or `SUPERMEMORY_API_KEY` is set), the plugin
+is in `opencode.jsonc`, `opencode plugin list` shows `supermemory` on OpenCode 2, and
+`~/.opencode-supermemory.log` for errors.
 
-```bash
-bunx opencode-supermemory@latest status
-```
+**Step 5: Initialize codebase memory (optional)**
 
-If it is not connected, check:
-
-1. Is the user authenticated, or is `SUPERMEMORY_API_KEY` set?
-2. Is the plugin in `opencode.jsonc`?
-3. Check logs: `tail ~/.opencode-supermemory.log`
-
-#### Step 5: Initialize codebase memory (optional)
-
-Run `/supermemory-init` to have the agent explore and memorize the codebase.
+Run `/supermemory-index` to have the agent explore and memorize the codebase. `/supermemory-init` is an alias.
 
 </details>
 
 ## Features
 
-### Context Injection
-
-On first message, the agent receives (invisible to user):
-
-- Personal profile for the current project
-- Project memories (all project knowledge)
-- Relevant user memories (semantic search)
-
-Example of what the agent sees:
+|  |  |
+| --- | --- |
+| 🧠 **Context injection**<br>On a session's first message, the agent silently receives your profile, all project knowledge, and (if `autoRecallEveryPrompt` is on) a semantic search over personal memories. | 🔎 **Reasoned recall**<br>Every turn, the agent is shown a directive asking it to decide whether recalling memory would help before answering. It searches via the `supermemory` tool only when it decides to; the search itself is auto-approved. |
+| 💾 **Automatic capture**<br>Completed turns are saved every `captureEveryNTurns` turns, with any remainder flushed when the session ends or OpenCode shuts down. Synthetic plugin context is excluded and `<private>` content is redacted. | 🗣️ **Keyword detection**<br>Saying "remember", "save this", "don't forget", or a custom pattern nudges the agent to save to memory. |
+| 🧭 **Codebase indexing**<br>`/supermemory-init` has the agent explore and memorize the codebase's structure, patterns, and conventions. | 🗜️ **Compaction memory**<br>On OpenCode V1, triggers summarization at 80% context capacity. On OpenCode 2, enriches the native compaction request. Both inject project memories into the summary and save the summary itself as a memory. |
+| 🔒 **Privacy**<br>Content wrapped in `<private>...</private>` is never stored. | 🔔 **Update notices**<br>Checks npm for a newer release on session start and surfaces a one-line notice. |
 
 ```
 [SUPERMEMORY]
@@ -148,17 +147,17 @@ Relevant Memories:
 
 The agent uses this context automatically - no manual prompting needed.
 
-### Reasoned Recall
+### Direct Recall
 
-On **every** turn, the agent is shown a short directive asking it to silently
-decide whether recalling saved memory would improve its answer to *this*
-message. The model searches only when earlier work, saved conventions, or user
-preferences are likely to help; trivial and self-contained messages skip the
-network call.
+On every substantive prompt, Supermemory directly searches the current project
+and injects up to five strong, fresh matches. Short prompts and commands are
+skipped, repeat results are suppressed per session, and recall fails open after
+three seconds so it never blocks the agent indefinitely.
 
-Recall uses the `supermemory` tool in `search` mode and is auto-approved.
-Customize the directive with `recallDirective`. Set `SUPERMEMORY_DEBUG=1` to
-show a `[recall-decision]` line in each reply while testing.
+Set `recallMode` to `"advisory"` to retain model-decided tool recall, or to
+`"off"` to disable automatic recall. `recallDirective` customizes advisory mode.
+Legacy `autoRecallEveryPrompt: true` maps to direct mode and `false` maps to
+advisory mode when `recallMode` is unset.
 
 ### Automatic Capture
 
@@ -168,7 +167,7 @@ Completed conversations are captured automatically:
 - Any remaining turns are flushed when the session is deleted or the OpenCode
   instance shuts down.
 - Synthetic plugin context is excluded and `<private>` content is redacted.
-- Stable capture IDs make repeated lifecycle events idempotent.
+- Stable capture IDs retain batch identity across repeated lifecycle events; they do not guarantee exactly-once processing or billing after an ambiguous response.
 
 ### Keyword Detection
 
@@ -183,64 +182,157 @@ Add custom triggers via `keywordPatterns` config.
 
 ### Codebase Indexing
 
-Run `/supermemory-init` to explore and memorize your codebase structure, patterns, and conventions.
+Run `/supermemory-index` to explore and memorize your codebase structure, patterns, and conventions. `/supermemory-init` is an alias.
 
-### Preemptive Compaction
+### Compaction Memory
 
-When context hits 80% capacity:
+On OpenCode V1, when context hits 80% capacity (`compactionThreshold`) the plugin triggers
+OpenCode's summarization, injects project memories into the summary prompt, and saves the
+resulting summary as a memory.
 
-1. Triggers OpenCode's summarization
-2. Injects project memories into summary context
-3. Saves session summary as a memory
+On OpenCode 2, OpenCode owns the compaction trigger and model. The plugin hooks the native
+compaction request to add the same project memories, then saves each successful summary as
+a memory. Set `compactionEnabled: false` to opt out on OpenCode 2.
 
-This preserves conversation context across compaction events.
+### Activity Notices and Status Footer
 
-### Privacy
+Supermemory shows a short native notice when it recalls memories, saves a turn, falls open
+because recall was unavailable, or a newer release exists. Notices never enter model
+context. On OpenCode V1 they are TUI toasts; on OpenCode 2 they are rendered by the
+`opencode-supermemory/tui` companion, which OpenCode loads automatically next to the
+server plugin.
 
+The same TUI plugin keeps a persistent `◪ supermemory` footer. It turns blue while a
+session is running and otherwise shows the latest recall or save activity, if any. On OpenCode V1
+the installer enables it through `~/.config/opencode/tui.jsonc`; on OpenCode 2 it appears
+in the prompt footer without extra configuration.
+
+Set `SUPERMEMORY_DEBUG=1` to show a `[recall-decision]` line in each reply while testing
+advisory recall.
+
+## OpenCode 2
+
+OpenCode 2 uses the plural `plugins` config key and the new `@opencode/plugin` API. The
+installer writes both generations, so one `opencode.jsonc` works for `opencode` (V1) and
+OpenCode 2 side by side:
+
+```jsonc
+{
+  "plugin": ["opencode-supermemory@latest"],
+  "plugins": ["opencode-supermemory"],
+  "permissions": [
+    { "action": "supermemory_recall", "resource": "*", "effect": "allow" },
+  ],
+}
 ```
-API key is <private>sk-abc123</private>
-```
 
-Content in `<private>` tags is never stored.
+OpenCode 2 resolves the package's `./server` export for the server plugin (id
+`supermemory`) and `./tui` for the notice companion (id `supermemory.tui`). Verify with
+`opencode plugin list` (or `v2 plugin registered` in `~/.opencode-supermemory.log`), and
+update with `opencode plugin update opencode-supermemory`.
 
-## Tool Usage
+What is the same on both generations:
+
+- Direct recall on substantive prompts, advisory mode, and `recallMode: "off"`
+- First-message profile injection, keyword nudges, and automatic capture with the same
+  cadence, privacy redaction, and idempotent capture IDs
+- The `supermemory` tool with identical modes, scopes, and result formatting
+- Activity notices, the persistent status footer, and update checks
+
+What differs on OpenCode 2:
+
+- Recall runs through the read-only `supermemory_recall` tool (search only). The installer
+  allows it without prompting; `add`, `forget`, and the rest stay behind the normal
+  `supermemory` permission. An explicit `deny` for `supermemory_recall` is preserved.
+- Compaction is native: the plugin enriches OpenCode's compaction request and saves the
+  summary instead of triggering compaction itself (`compactionEnabled`).
+- Recalled context is attached to the outgoing model request for the current prompt rather
+  than persisted into the transcript.
+
+To roll back on OpenCode 2 only, remove `"opencode-supermemory"` from `plugins` (or prefix
+it with `-`) and restart. The V1 `plugin` entry is unaffected.
+
+## Tool usage
 
 The `supermemory` tool is available to the agent:
 
-| Mode      | Args                         | Description       |
-| --------- | ---------------------------- | ----------------- |
-| `add`     | `content`, `type?`, `scope?` | Store memory      |
-| `search`  | `query`, `scope?`            | Search memories   |
-| `profile` | `query?`                     | View user profile |
-| `list`    | `scope?`, `limit?`           | List memories     |
-| `forget`  | `memoryId`, `scope?`         | Delete memory     |
+| Mode | Args | Description |
+| --- | --- | --- |
+| `add` | `content`, `type?`, `scope?` | Store memory |
+| `search` | `query`, `scope?` | Search memories |
+| `profile` | `query?` | View user profile |
+| `list` | `scope?`, `limit?` | List memories |
+| `forget` | `memoryId`, `scope?` | Delete memory |
+| `help` | none | List available modes |
 
 **Scopes:** `user` (personal memories for the current project), `project` (default)
 
 **Types:** `project-config`, `architecture`, `error-solution`, `preference`, `learned-pattern`, `conversation`
 
-OpenCode sends the same shared coding-agent entity context as Claude Code and
-Codex. Personal and project memories are distinguished with `sm_scope`
-metadata inside the shared repository container.
+OpenCode sends the same shared coding-agent entity context as Claude Code and Codex.
+Personal and project memories are distinguished with `sm_scope` metadata inside the
+shared repository container.
 
-## Memory Scoping
+## Memory scoping
 
-| Scope   | Tag                                         | Metadata                |
-| ------- | ------------------------------------------- | ----------------------- |
-| User    | `repo_{project-name}__{repository-hash}`    | `sm_scope: "personal"`  |
-| Project | `repo_{project-name}__{repository-hash}`    | `sm_scope: "project"`   |
+| Scope | Tag | Metadata |
+| --- | --- | --- |
+| User | `repo_{project-name}__{repository-hash}` | `sm_scope: "personal"` |
+| Project | `repo_{project-name}__{repository-hash}` | `sm_scope: "project"` |
 
-The repository hash comes from the normalized Git `origin` remote, so Claude
-Code, Codex, and OpenCode use the same container for the same repository.
-Repositories with the same name but different remotes remain isolated. Without
-an origin remote, OpenCode falls back to the repository's real filesystem path.
+The repository hash comes from the normalized Git `origin` remote, so Claude Code,
+Codex, Cursor, and OpenCode use the same container for the same repository.
+Repositories with the same name but different remotes remain isolated. Without an
+origin remote, OpenCode falls back to the repository's real filesystem path.
+
 OpenCode also reads previous `user_project_*`, `repo_<project-name>`,
 `claudecode_project_*`, `codex_user_*`, `codex_project_*`, `opencode_user_*`,
-and `opencode_project_*` containers, so upgrading does not require a migration.
+`opencode_project_*`, `cursor_user_*`, and `cursor_project_*` containers, so upgrading
+does not require a migration.
 
 ## Configuration
 
-Create `~/.config/opencode/supermemory.jsonc`:
+### Environment variables
+
+| Variable | Purpose |
+| --- | --- |
+| `SUPERMEMORY_API_KEY` | Your Supermemory API key (takes precedence over the config file). |
+| `SUPERMEMORY_API_URL` / `SUPERMEMORY_BASE_URL` | Override the Supermemory API base URL. |
+| `SUPERMEMORY_API_VERSION` | Select `legacy` or `v5`, overriding `apiVersion` in the config file. |
+| `SUPERMEMORY_AUTH_URL` | Override the browser-auth base URL. |
+| `SUPERMEMORY_AUTH_TIMEOUT` | Browser-auth timeout in milliseconds (default 5 minutes). |
+| `SUPERMEMORY_REPO_TAG` | Explicit project-container override, checked before the config value. |
+| `SUPERMEMORY_ISOLATE_WORKTREES` | Set to `true` to key the project container on the worktree path instead of the Git remote. |
+| `SUPERMEMORY_DEBUG` | Set to show `[recall-decision]` lines and enable debug logging. |
+
+### `~/.config/opencode/supermemory.jsonc`
+
+Hosted content calls use the official Supermemory v5 SDK. Custom base URLs default
+to the bundled legacy SDK so existing self-hosted servers, including 0.0.8, keep
+working. After independently upgrading a custom server to support v5, opt in with
+`"apiVersion": "v5"` or `SUPERMEMORY_API_VERSION=v5`. Set `legacy` explicitly to
+keep the old content protocol on any endpoint. Failed requests never switch API
+versions or reroute to hosted Supermemory, and existing container names, IDs,
+credentials, capture cadence, and configuration files are not migrated or renamed.
+
+The existing best-effort `filterPrompt` / `shouldLLMFilter` settings update remains
+on the legacy settings endpoint for both protocols. v5 has no equivalent filter
+toggle; the plugin does not replace organization context or request administrator
+permissions. A server without that legacy endpoint cannot apply these settings;
+capture and recall still work, and the failure is recorded in the existing log.
+Browser login and account status also retain their separate legacy auth/session
+boundary.
+
+v5 capture uses document POST append/diff with `dreaming: "dynamic"`; accepted
+documents may take minutes to form recallable memories. The plugin does not enable
+the extra-billable instant mode. Profiles normalize fact objects to text and issue
+a separate search only when a query is requested. Document lists fetch canonical
+content per document to retain the previous content-inclusive response, so lists
+and compaction can require additional requests under the existing timeout budget.
+Individual failed, invalid or late content reads retain the listed document's
+identity, summary and lifecycle fields; hydration uses the remaining list budget
+with a return grace. Content is accepted only from the matching document ID and
+scope, not from a different or malformed response.
 
 ```jsonc
 {
@@ -251,7 +343,7 @@ Create `~/.config/opencode/supermemory.jsonc`:
   "baseUrl": "https://api.supermemory.ai",
 
   // Min similarity for memory retrieval (0-1)
-  "similarityThreshold": 0.6,
+  "similarityThreshold": 0.55,
 
   // Max memories injected per request
   "maxMemories": 5,
@@ -265,33 +357,43 @@ Create `~/.config/opencode/supermemory.jsonc`:
   // Include user profile in context
   "injectProfile": true,
 
+  // Also run a semantic search over personal memories on a session's first
+  // message, not just profile + project list (default: true on upgrades,
+  // false on fresh installs)
+  "autoRecallEveryPrompt": true,
+
   // Legacy prefix retained when reading containers made by older versions
   "containerTagPrefix": "opencode",
 
   // Optional legacy personal container to keep reading
   "userContainerTag": "my-custom-user-tag",
 
-  // Optional: Set exact project container tag (overrides auto-generated tag)
+  // Optional: set exact project container tag (overrides auto-generated tag)
   "projectContainerTag": "my-project-tag",
 
   // Extra keyword patterns for memory detection (regex)
   "keywordPatterns": ["log\\s+this", "write\\s+down"],
 
-  // Context usage ratio that triggers compaction (0-1)
+  // OpenCode V1: context usage ratio that triggers compaction (0-1)
   "compactionThreshold": 0.8,
+
+  // OpenCode 2: enrich native compaction with project memories and save summaries
+  "compactionEnabled": true,
 
   // Save completed conversation batches every N turns (0 = session end only)
   "captureEveryNTurns": 3,
 
-  // Override the reasoned-recall directive shown to the agent each turn
-  // (null or unset = built-in default)
+  // "direct" (default for new installs), "advisory", or "off"
+  "recallMode": "direct",
+
+  // Override the directive used in advisory mode
   "recallDirective": null,
 }
 ```
 
-All fields optional. Env var `SUPERMEMORY_API_KEY` takes precedence over config file.
+All fields optional.
 
-### Container Tag Selection
+### Container tag selection
 
 By default, new writes use:
 
@@ -299,8 +401,8 @@ By default, new writes use:
 - No origin remote: `repo_{project-name}__{hash(real-repository-path)}`
 
 Older `{prefix}_user_*` and `{prefix}_project_*` containers remain readable.
-`userContainerTag` is treated as a legacy personal read. You can still override
-the unified write container with `projectContainerTag`:
+`userContainerTag` is treated as a legacy personal read. You can still override the
+unified write container with `projectContainerTag`:
 
 ```jsonc
 {
@@ -312,18 +414,15 @@ the unified write container with `projectContainerTag`:
 }
 ```
 
-This is useful when you want to:
-
-- Preserve a legacy personal memory container
-- Sync memories between different machines for the same project
-- Organize memories using your own naming scheme
-- Integrate with existing Supermemory container tags from other tools
+This is useful to preserve a legacy personal memory container, sync memories between
+machines for the same project, organize memories with your own naming scheme, or
+integrate with existing Supermemory container tags from other tools.
 
 ## Usage with Oh My OpenCode
 
-If you're using [Oh My OpenCode](https://github.com/code-yeongyu/oh-my-opencode), disable its built-in auto-compact hook to let supermemory handle context compaction:
-
-Add to `~/.config/opencode/oh-my-opencode.json`:
+If you're using [Oh My OpenCode](https://github.com/code-yeongyu/oh-my-opencode),
+disable its built-in auto-compact hook to let supermemory handle context compaction
+(or pass `--disable-context-recovery` to `install`):
 
 ```json
 {
@@ -331,7 +430,11 @@ Add to `~/.config/opencode/oh-my-opencode.json`:
 }
 ```
 
-## Development
+Add that to `~/.config/opencode/oh-my-opencode.json`.
+
+<details>
+<summary>Development</summary>
+<br>
 
 ```bash
 bun install
@@ -339,19 +442,32 @@ bun run build
 bun run typecheck
 ```
 
-Local install:
+Local install (OpenCode V1 loads the built package; OpenCode 2 loads `server.ts` and
+`tui.ts` from the checkout, so `bun install` is enough):
 
 ```jsonc
+// ~/.config/opencode/opencode.jsonc
 {
   "plugin": ["file:///path/to/opencode-supermemory"],
+  "plugins": ["/path/to/opencode-supermemory"],
 }
 ```
 
-## Logs
+The TUI side of a local checkout is registered separately: OpenCode V1 reads
+`~/.config/opencode/tui.jsonc` (`"plugin": ["file:///path/to/opencode-supermemory/dist/tui.js"]`)
+and OpenCode 2 reads `~/.config/opencode/cli.json` (`"plugins": ["/path/to/opencode-supermemory"]`).
+Published packages need neither; both generations find the `./tui` export on their own.
+
+`opencode plugin list` only shows package plugins, so confirm a checkout loaded by looking
+for `v2 plugin init` and `v2 plugin registered` in `~/.opencode-supermemory.log`.
+
+Logs:
 
 ```bash
 tail -f ~/.opencode-supermemory.log
 ```
+
+</details>
 
 ## License
 

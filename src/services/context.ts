@@ -1,14 +1,12 @@
-import type { ProfileResponse } from "./client.js";
+import type { ProfileResponse, SearchResultItem } from "./client.js";
 import { CONFIG } from "../config.js";
-
-interface MemoryResultMinimal {
-  similarity?: number;
-  memory?: string;
-  chunk?: string;
-}
+import {
+  formatRecallHit,
+  normalizeRecallResults,
+} from "./recall-results.js";
 
 interface MemoriesResponseMinimal {
-  results?: MemoryResultMinimal[];
+  results?: SearchResultItem[];
 }
 
 function extractFactText(fact: unknown): string {
@@ -21,54 +19,87 @@ function extractFactText(fact: unknown): string {
   return String(fact ?? "");
 }
 
+function selectInjectedProfileFacts(
+  profile: ProfileResponse | null,
+  maxItems: number,
+): { static: string[]; dynamic: string[] } {
+  if (!profile?.profile) {
+    return { static: [], dynamic: [] };
+  }
+
+  return {
+    static: profile.profile.static
+      .slice(0, maxItems)
+      .map(extractFactText)
+      .filter(Boolean),
+    dynamic: profile.profile.dynamic
+      .slice(0, maxItems)
+      .map(extractFactText)
+      .filter(Boolean),
+  };
+}
+
+export function getInjectedProfileFactTexts(
+  profile: ProfileResponse | null,
+  maxItems = CONFIG.maxProfileItems,
+): string[] {
+  const facts = selectInjectedProfileFacts(profile, maxItems);
+  return [...facts.static, ...facts.dynamic];
+}
+
 export function formatContextForPrompt(
   profile: ProfileResponse | null,
   userMemories: MemoriesResponseMinimal,
   projectMemories: MemoriesResponseMinimal
 ): string {
-  const parts: string[] = ["[SUPERMEMORY]"];
+  const parts: string[] = [
+    "[SUPERMEMORY]",
+    "Every line marked ◪ comes from supermemory. When one shapes your answer, credit it naturally with the ◪ prefix; if you name the source, say \"from supermemory\".",
+  ];
 
-  if (CONFIG.injectProfile && profile?.profile) {
-    const { static: staticFacts, dynamic: dynamicFacts } = profile.profile;
+  const profileFacts = CONFIG.injectProfile
+    ? selectInjectedProfileFacts(profile, CONFIG.maxProfileItems)
+    : { static: [], dynamic: [] };
 
-    if (staticFacts.length > 0) {
-      parts.push("\nUser Profile:");
-      staticFacts.slice(0, CONFIG.maxProfileItems).forEach((fact) => {
-        const text = extractFactText(fact);
-        parts.push(`- ${text}`);
-      });
-    }
-
-    if (dynamicFacts.length > 0) {
-      parts.push("\nRecent Context:");
-      dynamicFacts.slice(0, CONFIG.maxProfileItems).forEach((fact) => {
-        const text = extractFactText(fact);
-        parts.push(`- ${text}`);
-      });
-    }
+  if (profileFacts.static.length > 0) {
+    parts.push("\nUser Profile:");
+    profileFacts.static.forEach((fact) => {
+      parts.push(`- ◪ ${fact}`);
+    });
   }
 
-  const projectResults = projectMemories.results || [];
+  if (profileFacts.dynamic.length > 0) {
+    parts.push("\nRecent Context:");
+    profileFacts.dynamic.forEach((fact) => {
+      parts.push(`- ◪ ${fact}`);
+    });
+  }
+
+  const projectResults = normalizeRecallResults(projectMemories.results || []);
   if (projectResults.length > 0) {
     parts.push("\nProject Knowledge:");
-    projectResults.forEach((mem) => {
-      const similarity = Math.round((mem.similarity ?? 0) * 100);
-      const content = mem.memory || mem.chunk || "";
-      parts.push(`- [${similarity}%] ${content}`);
+    projectResults.forEach((hit) => {
+      const score =
+        hit.similarity === undefined
+          ? ""
+          : ` [${Math.round(hit.similarity * 100)}%]`;
+      parts.push(`- ◪${score} ${formatRecallHit(hit)}`);
     });
   }
 
-  const userResults = userMemories.results || [];
+  const userResults = normalizeRecallResults(userMemories.results || []);
   if (userResults.length > 0) {
     parts.push("\nRelevant Memories:");
-    userResults.forEach((mem) => {
-      const similarity = Math.round((mem.similarity ?? 0) * 100);
-      const content = mem.memory || mem.chunk || "";
-      parts.push(`- [${similarity}%] ${content}`);
+    userResults.forEach((hit) => {
+      const score =
+        hit.similarity === undefined
+          ? ""
+          : ` [${Math.round(hit.similarity * 100)}%]`;
+      parts.push(`- ◪${score} ${formatRecallHit(hit)}`);
     });
   }
 
-  if (parts.length === 1) {
+  if (parts.length === 2) {
     return "";
   }
 

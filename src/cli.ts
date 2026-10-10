@@ -3,22 +3,35 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import * as readline from "node:readline";
-import { stripJsoncComments } from "./services/jsonc.js";
 import { startAuthFlow, clearCredentials, loadCredentials, CREDENTIALS_FILE } from "./services/auth.js";
 import { CONFIG, CONFIG_FILE, SUPERMEMORY_API_KEY, getApiBaseUrl, isConfigured, writeInstallDefaults } from "./config.js";
 import { SupermemoryClient } from "./services/client.js";
 import { getTags } from "./services/tags.js";
+import {
+  editOpenCodeConfig,
+  editOpenCodeTuiConfig,
+  readOpenCodeRegistration,
+  readOpenCodeTuiRegistration,
+  V1_PLUGIN_ENTRY,
+  V2_PLUGIN_ENTRY,
+} from "./services/opencode-config.js";
 
 const OPENCODE_CONFIG_DIR = join(homedir(), ".config", "opencode");
-const OPENCODE_COMMAND_DIR = join(OPENCODE_CONFIG_DIR, "command");
-const PLUGIN_NAME = "opencode-supermemory@latest";
+const OPENCODE_COMMAND_DIRS = [
+  join(OPENCODE_CONFIG_DIR, "commands"),
+  join(OPENCODE_CONFIG_DIR, "command"),
+];
+const OPENCODE_TUI_CONFIGS = [
+  join(OPENCODE_CONFIG_DIR, "tui.jsonc"),
+  join(OPENCODE_CONFIG_DIR, "tui.json"),
+];
 const DEFAULT_CONFIG_FILE = CONFIG_FILE ?? join(OPENCODE_CONFIG_DIR, "supermemory.json");
 
-const SUPERMEMORY_INIT_COMMAND = `---
-description: Initialize Supermemory with comprehensive codebase knowledge
+const SUPERMEMORY_INDEX_COMMAND = `---
+description: Index this codebase into Supermemory
 ---
 
-# Initializing Supermemory
+# Indexing Codebase into Supermemory
 
 You are initializing persistent memory for this codebase. This is not just data collection - you're building context that will make you significantly more effective across all future sessions.
 
@@ -76,11 +89,27 @@ This is a **deep research** initialization. Take your time and be thorough (~50+
 
 ## Research Techniques
 
+### Ecosystem auto-detect
+Identify the language/ecosystem from manifests and configs **before** deep research. A repo may use more than one; research each that is present. Do not assume JavaScript/TypeScript.
+
+- **JS/TS**: package.json, bun.lock, bun.lockb, pnpm-lock.yaml, yarn.lock, package-lock.json, tsconfig.json, jsconfig.json, deno.json, biome.json
+- **Python**: pyproject.toml, requirements.txt, setup.py, setup.cfg, Pipfile, poetry.lock, environment.yml, tox.ini
+- **Go**: go.mod, go.sum
+- **Rust**: Cargo.toml, Cargo.lock
+- **.NET/C#**: *.csproj, *.fsproj, *.vbproj, *.sln, nuget.config, Directory.Build.props, global.json
+- **Java/Kotlin**: pom.xml, build.gradle, build.gradle.kts, settings.gradle, settings.gradle.kts, gradlew
+- **Ruby**: Gemfile, Gemfile.lock, Rakefile, *.gemspec
+- **PHP**: composer.json, composer.lock
+- **Swift**: Package.swift, Package.resolved, *.xcodeproj, *.xcworkspace
+- **Elixir**: mix.exs, mix.lock
+
+Use the matching toolchain for commands, tests, and conventions (not JS/TS defaults unless that is the detected ecosystem).
+
 ### File-based
 - README.md, CONTRIBUTING.md, AGENTS.md, CLAUDE.md
-- Package manifests (package.json, Cargo.toml, pyproject.toml, go.mod)
-- Config files (.eslintrc, tsconfig.json, .prettierrc)
-- CI/CD configs (.github/workflows/)
+- Package manifests for the detected ecosystem(s) (package.json, Cargo.toml, pyproject.toml, go.mod, *.csproj, pom.xml, build.gradle, Gemfile, composer.json, Package.swift, mix.exs)
+- Config files (.eslintrc, tsconfig.json, .prettierrc, pyproject.toml, .golangci.yml, rustfmt.toml, .editorconfig)
+- CI/CD configs (.github/workflows/, .gitlab-ci.yml, azure-pipelines.yml)
 
 ### Git-based
 - \`git log --oneline -20\` - Recent history
@@ -118,7 +147,7 @@ Good (thorough):
 Use the \`supermemory\` tool for each distinct insight:
 
 \`\`\`
-supermemory(mode: "add", content: "...", type: "...", scope: "project")
+supermemory(mode: "add", content: "...", type: "project-config"|"architecture"|"learned-pattern"|"error-solution"|"preference", scope: "project"|"user")
 \`\`\`
 
 **Types:**
@@ -159,12 +188,12 @@ Then ask: "I've initialized memory with X insights. Want me to continue refining
 ## Your Task
 
 1. Ask upfront questions (research depth, rules, preferences)
-2. Check existing memories: \`supermemory(mode: "list", scope: "project")\`
-3. Research based on chosen depth
+2. Check existing memories first: \`supermemory(mode: "list", scope: "project")\`
+3. Auto-detect the ecosystem(s), then research based on chosen depth
 4. Save memories incrementally as you discover insights
 5. Reflect and verify completeness
 6. Summarize what was learned and ask if user wants refinement
-`;
+`
 
 const SUPERMEMORY_LOGIN_COMMAND = `---
 description: Authenticate with Supermemory via browser
@@ -255,51 +284,18 @@ function findOpencodeConfig(): string | null {
 function addPluginToConfig(configPath: string): boolean {
   try {
     const content = readFileSync(configPath, "utf-8");
-    
-    if (content.includes("opencode-supermemory")) {
-      console.log("✓ Plugin already registered in config");
-      return true;
-    }
+    const result = editOpenCodeConfig(content);
 
-    const jsonContent = stripJsoncComments(content);
-    let config: Record<string, unknown>;
-    
-    try {
-      config = JSON.parse(jsonContent);
-    } catch {
-      console.error("✗ Failed to parse config file");
-      return false;
-    }
-
-    const plugins = (config.plugin as string[]) || [];
-    plugins.push(PLUGIN_NAME);
-    config.plugin = plugins;
-
-    if (configPath.endsWith(".jsonc")) {
-      if (content.includes('"plugin"')) {
-        const newContent = content.replace(
-          /("plugin"\s*:\s*\[)([^\]]*?)(\])/,
-          (_match, start, middle, end) => {
-            const trimmed = middle.trim();
-            if (trimmed === "") {
-              return `${start}\n    "${PLUGIN_NAME}"\n  ${end}`;
-            }
-            return `${start}${middle.trimEnd()},\n    "${PLUGIN_NAME}"\n  ${end}`;
-          }
-        );
-        writeFileSync(configPath, newContent);
-      } else {
-        const newContent = content.replace(
-          /^(\s*\{)/,
-          `$1\n  "plugin": ["${PLUGIN_NAME}"],`
-        );
-        writeFileSync(configPath, newContent);
-      }
+    if (result.changed) {
+      writeFileSync(configPath, result.content);
+      console.log(`✓ Registered plugin for OpenCode V1 ("plugin") and OpenCode 2 ("plugins") in ${configPath}`);
     } else {
-      writeFileSync(configPath, JSON.stringify(config, null, 2));
+      console.log("✓ Plugin already registered for OpenCode V1 and OpenCode 2");
     }
 
-    console.log(`✓ Added plugin to ${configPath}`);
+    for (const warning of result.warnings) {
+      console.warn(`⚠ ${warning}`);
+    }
     return true;
   } catch (err) {
     console.error("✗ Failed to update config:", err);
@@ -310,34 +306,53 @@ function addPluginToConfig(configPath: string): boolean {
 function createNewConfig(): boolean {
   const configPath = join(OPENCODE_CONFIG_DIR, "opencode.jsonc");
   mkdirSync(OPENCODE_CONFIG_DIR, { recursive: true });
-  
-  const config = `{
-  "plugin": ["${PLUGIN_NAME}"]
-}
-`;
-  
-  writeFileSync(configPath, config);
+
+  const config = editOpenCodeConfig("{}\n");
+  writeFileSync(configPath, config.content);
   console.log(`✓ Created ${configPath}`);
   return true;
 }
 
+function configureTuiPlugin(): boolean {
+  const configPath = OPENCODE_TUI_CONFIGS.find((path) => existsSync(path)) ?? OPENCODE_TUI_CONFIGS[0]!;
+  try {
+    const content = existsSync(configPath) ? readFileSync(configPath, "utf-8") : "";
+    const result = editOpenCodeTuiConfig(content);
+    if (result.changed) {
+      mkdirSync(OPENCODE_CONFIG_DIR, { recursive: true });
+      writeFileSync(configPath, result.content);
+      console.log(`✓ Enabled the persistent Supermemory footer for OpenCode V1 in ${configPath}`);
+    } else {
+      console.log("✓ Persistent Supermemory footer already enabled for OpenCode V1");
+    }
+    console.log("  OpenCode 2 loads the footer automatically from the plugin package.");
+    return true;
+  } catch (err) {
+    console.error("✗ Failed to update TUI config:", err);
+    return false;
+  }
+}
+
 function createCommands(): boolean {
-  mkdirSync(OPENCODE_COMMAND_DIR, { recursive: true });
+  const files: Array<[string, string]> = [
+    ["supermemory-index.md", SUPERMEMORY_INDEX_COMMAND],
+    ["supermemory-init.md", SUPERMEMORY_INDEX_COMMAND],
+    ["supermemory-login.md", SUPERMEMORY_LOGIN_COMMAND],
+    ["supermemory-logout.md", SUPERMEMORY_LOGOUT_COMMAND],
+    ["supermemory-status.md", SUPERMEMORY_STATUS_COMMAND],
+  ];
 
-  const initPath = join(OPENCODE_COMMAND_DIR, "supermemory-init.md");
-  writeFileSync(initPath, SUPERMEMORY_INIT_COMMAND);
+  for (const dir of OPENCODE_COMMAND_DIRS) {
+    mkdirSync(dir, { recursive: true });
+    for (const [name, body] of files) {
+      writeFileSync(join(dir, name), body);
+    }
+  }
+
+  console.log(`✓ Created /supermemory-index command`);
   console.log(`✓ Created /supermemory-init command`);
-
-  const loginPath = join(OPENCODE_COMMAND_DIR, "supermemory-login.md");
-  writeFileSync(loginPath, SUPERMEMORY_LOGIN_COMMAND);
   console.log(`✓ Created /supermemory-login command`);
-
-  const logoutPath = join(OPENCODE_COMMAND_DIR, "supermemory-logout.md");
-  writeFileSync(logoutPath, SUPERMEMORY_LOGOUT_COMMAND);
   console.log(`✓ Created /supermemory-logout command`);
-
-  const statusPath = join(OPENCODE_COMMAND_DIR, "supermemory-status.md");
-  writeFileSync(statusPath, SUPERMEMORY_STATUS_COMMAND);
   console.log(`✓ Created /supermemory-status command`);
 
   return true;
@@ -350,12 +365,13 @@ interface InstallOptions {
 async function install(options: InstallOptions): Promise<number> {
   console.log("\n🧠 opencode-supermemory installer\n");
 
+  mkdirSync(OPENCODE_CONFIG_DIR, { recursive: true });
   writeInstallDefaults(existsSync(DEFAULT_CONFIG_FILE));
 
   const rl = options.tui ? createReadline() : null;
 
   // Step 1: Register plugin in config
-  console.log("Step 1: Register plugin in OpenCode config");
+  console.log("Step 1: Register plugin in OpenCode config (OpenCode V1 and OpenCode 2)");
   const configPath = findOpencodeConfig();
   
   if (configPath) {
@@ -382,8 +398,10 @@ async function install(options: InstallOptions): Promise<number> {
     }
   }
 
+  configureTuiPlugin();
+
   // Step 2: Create commands
-  console.log("\nStep 2: Create /supermemory-init, /supermemory-login, /supermemory-logout, and /supermemory-status commands");
+  console.log("\nStep 2: Create /supermemory-index, /supermemory-init, /supermemory-login, /supermemory-logout, and /supermemory-status commands");
   if (options.tui) {
     const shouldCreate = await confirm(rl!, "Add supermemory commands?");
     if (!shouldCreate) {
@@ -411,7 +429,7 @@ async function install(options: InstallOptions): Promise<number> {
   console.log("\nOr set your API key manually:");
   console.log('  export SUPERMEMORY_API_KEY="sm_..."');
   console.log("\n" + "─".repeat(50));
-  console.log("\n✓ Setup complete! Restart OpenCode to activate.\n");
+  console.log("\n✓ Setup complete! Restart OpenCode (V1 and/or OpenCode 2) to activate.\n");
   return 0;
 }
 
@@ -495,6 +513,40 @@ async function getAccountInfo(apiUrl: string): Promise<{ email?: string; name?: 
   };
 }
 
+function describeOpenCodeRegistration(): string[] {
+  const configPath = findOpencodeConfig();
+  if (!configPath) {
+    return [`OpenCode config: not found (run \`bunx opencode-supermemory@latest install\`)`];
+  }
+  try {
+    const registration = readOpenCodeRegistration(readFileSync(configPath, "utf-8"));
+    const v2Permission = registration.recallDenied
+      ? "recall denied"
+      : registration.recallAllowed
+        ? "recall auto-allowed"
+        : "default permissions";
+    const tuiConfig = OPENCODE_TUI_CONFIGS.find((path) => existsSync(path));
+    let tuiFooter = "missing (re-run install)";
+    if (tuiConfig) {
+      try {
+        if (readOpenCodeTuiRegistration(readFileSync(tuiConfig, "utf-8"))) {
+          tuiFooter = `registered (${tuiConfig})`;
+        }
+      } catch {
+        tuiFooter = `unreadable (${tuiConfig})`;
+      }
+    }
+    return [
+      `OpenCode config: ${configPath}`,
+      `OpenCode V1 plugin entry: ${registration.v1 ? "registered" : `missing (add \"${V1_PLUGIN_ENTRY}\" to \"plugin\")`}`,
+      `OpenCode V1 TUI footer: ${tuiFooter}`,
+      `OpenCode 2 plugin entry: ${registration.v2 ? `registered (${v2Permission}; footer loads automatically)` : `missing (add \"${V2_PLUGIN_ENTRY}\" to \"plugins\")`}`,
+    ];
+  } catch (error) {
+    return [`OpenCode config: ${configPath} (unreadable: ${error instanceof Error ? error.message : String(error)})`];
+  }
+}
+
 async function status(): Promise<number> {
   const apiUrl = getApiBaseUrl();
   const tags = getTags(process.cwd());
@@ -506,12 +558,13 @@ async function status(): Promise<number> {
   lines.push(`API key: ${maskKey(SUPERMEMORY_API_KEY)} (${getKeySource()})`);
   lines.push(`API URL: ${apiUrl}`);
   lines.push("Memory scope: unified project container with personal/project metadata");
-  lines.push(`Recall mode: per-turn reasoned recall${CONFIG.autoRecallEveryPrompt ? " + eager session-start dump" : ""}`);
-  lines.push(`Recall directive: ${CONFIG.recallDirective ? "custom" : "default"}`);
+  lines.push(`Recall mode: ${CONFIG.recallMode}`);
+  lines.push(`Recall directive: ${CONFIG.recallMode === "advisory" && CONFIG.recallDirective ? "custom" : "default"}`);
   lines.push(`Capture cadence: ${CONFIG.captureEveryNTurns > 0 ? `every ${CONFIG.captureEveryNTurns} turn${CONFIG.captureEveryNTurns === 1 ? "" : "s"} + session end` : "session end only"}`);
   lines.push(`Project container: ${tags.canonical}`);
   lines.push(`Personal reads: ${tags.personalReads.join(", ")}`);
   lines.push(`Project reads: ${tags.projectReads.join(", ")}`);
+  lines.push(...describeOpenCodeRegistration());
 
   if (!isConfigured()) {
     lines.push("");

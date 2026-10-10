@@ -12,11 +12,13 @@ const CONFIG_FILES = [
 ];
 
 export const DEFAULT_BASE_URL = "https://api.supermemory.ai";
-const DEFAULT_COMPACTION_THRESHOLD = 0.8;
+
+export type RecallMode = "direct" | "advisory" | "off";
 
 interface SupermemoryConfig {
   apiKey?: string;
   baseUrl?: string;
+  apiVersion?: "legacy" | "v5";
   similarityThreshold?: number;
   maxMemories?: number;
   maxProjectMemories?: number;
@@ -27,12 +29,17 @@ interface SupermemoryConfig {
   projectContainerTag?: string;
   filterPrompt?: string;
   keywordPatterns?: string[];
+  /** Enrich OpenCode's native compaction with project memories and save summaries. */
   compactionEnabled?: boolean;
-  /** @deprecated OpenCode now owns the compaction trigger. Use compactionEnabled. */
+  /**
+   * @deprecated OpenCode now decides when to compact. Only `0` or `false` is
+   * still read, as a way to turn compaction memory off; use compactionEnabled.
+   */
   compactionThreshold?: number | false;
   autoRecallEveryPrompt?: boolean;
   captureEveryNTurns?: number;
   recallDirective?: string | null;
+  recallMode?: RecallMode;
 }
 
 const DEFAULT_KEYWORD_PATTERNS = [
@@ -54,8 +61,10 @@ const DEFAULT_KEYWORD_PATTERNS = [
   "always\\s+remember",
 ];
 
-const DEFAULTS: Required<Omit<SupermemoryConfig, "apiKey" | "baseUrl" | "userContainerTag" | "projectContainerTag" | "recallDirective">> = {
-  similarityThreshold: 0.6,
+const DEFAULT_COMPACTION_THRESHOLD = 0.8;
+
+const DEFAULTS: Required<Omit<SupermemoryConfig, "apiKey" | "baseUrl" | "apiVersion" | "userContainerTag" | "projectContainerTag" | "recallDirective">> = {
+  similarityThreshold: 0.55,
   maxMemories: 5,
   maxProjectMemories: 10,
   maxProfileItems: 5,
@@ -63,10 +72,11 @@ const DEFAULTS: Required<Omit<SupermemoryConfig, "apiKey" | "baseUrl" | "userCon
   containerTagPrefix: "opencode",
   filterPrompt: "You are a stateful coding agent. Remember all the information, including but not limited to user's coding preferences, tech stack, behaviours, workflows, and any other relevant details.",
   keywordPatterns: [],
-  compactionEnabled: true,
   compactionThreshold: DEFAULT_COMPACTION_THRESHOLD,
+  compactionEnabled: true,
   autoRecallEveryPrompt: false,
   captureEveryNTurns: 0,
+  recallMode: "direct",
 };
 
 function isValidRegex(pattern: string): boolean {
@@ -89,11 +99,12 @@ export function validateCompactionThreshold(
   return value;
 }
 
+/** `compactionEnabled` wins; otherwise a legacy threshold of 0 or false turns it off. */
 export function resolveCompactionEnabled(
-  enabled: boolean | undefined,
+  enabled: unknown,
   legacyThreshold: number | false | undefined,
 ): boolean {
-  if (enabled !== undefined) return enabled;
+  if (typeof enabled === "boolean") return enabled;
   return validateCompactionThreshold(legacyThreshold) !== 0;
 }
 
@@ -110,6 +121,20 @@ function validateCaptureEveryNTurns(
     return fallback;
   }
   return value;
+}
+
+function resolveRecallMode(): RecallMode {
+  if (
+    fileConfig.recallMode === "direct" ||
+    fileConfig.recallMode === "advisory" ||
+    fileConfig.recallMode === "off"
+  ) {
+    return fileConfig.recallMode;
+  }
+  if (fileConfig.recallDirective?.trim()) return "advisory";
+  if (fileConfig.autoRecallEveryPrompt === true) return "direct";
+  if (fileConfig.autoRecallEveryPrompt === false) return "advisory";
+  return DEFAULTS.recallMode;
 }
 
 function loadRawConfig(): { config: SupermemoryConfig; existed: boolean } {
@@ -166,6 +191,15 @@ export function getApiBaseUrl(): string {
   return normalized;
 }
 
+export function getApiVersion(): "legacy" | "v5" {
+  const version = process.env.SUPERMEMORY_API_VERSION ?? fileConfig.apiVersion;
+  if (version !== undefined) {
+    if (version === "legacy" || version === "v5") return version;
+    throw new Error('Invalid apiVersion: expected "legacy" or "v5"');
+  }
+  return getApiBaseUrl() === DEFAULT_BASE_URL ? "v5" : "legacy";
+}
+
 export const CONFIG_FILE = CONFIG_FILES[1];
 const DEFAULT_CONFIG_FILE = CONFIG_FILE ?? join(CONFIG_DIR, "supermemory.json");
 
@@ -183,14 +217,15 @@ export const CONFIG = {
     ...DEFAULT_KEYWORD_PATTERNS,
     ...(fileConfig.keywordPatterns ?? []).filter(isValidRegex),
   ],
+  compactionThreshold: validateCompactionThreshold(fileConfig.compactionThreshold),
   compactionEnabled: resolveCompactionEnabled(
     fileConfig.compactionEnabled,
     fileConfig.compactionThreshold,
   ),
-  compactionThreshold: validateCompactionThreshold(fileConfig.compactionThreshold),
   autoRecallEveryPrompt:
     fileConfig.autoRecallEveryPrompt ??
     (configExisted ? true : DEFAULTS.autoRecallEveryPrompt),
+  recallMode: resolveRecallMode(),
   captureEveryNTurns: validateCaptureEveryNTurns(
     fileConfig.captureEveryNTurns,
     configExisted ? 3 : DEFAULTS.captureEveryNTurns,
@@ -202,18 +237,23 @@ export function isConfigured(): boolean {
   return !!SUPERMEMORY_API_KEY;
 }
 
-export function getRecallConfig(): { directive: string | null } {
-  return { directive: CONFIG.recallDirective ?? null };
+export function getRecallConfig(): {
+  directive: string | null;
+  mode: RecallMode;
+} {
+  return {
+    directive: CONFIG.recallDirective ?? null,
+    mode: CONFIG.recallMode,
+  };
 }
 
 export function writeInstallDefaults(isExistingInstall: boolean): void {
   const current = loadRawConfig().config;
   const next: SupermemoryConfig = { ...current };
   if (isExistingInstall) {
-    if (next.autoRecallEveryPrompt === undefined) next.autoRecallEveryPrompt = true;
     if (next.captureEveryNTurns === undefined) next.captureEveryNTurns = 3;
   } else {
-    next.autoRecallEveryPrompt = false;
+    next.recallMode = "direct";
     next.captureEveryNTurns = 0;
   }
   writeFileSync(DEFAULT_CONFIG_FILE, JSON.stringify(next, null, 2));
