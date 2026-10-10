@@ -8,6 +8,7 @@ import {
   applyInjection,
   buildTranscriptTurns,
   buildV2RecallDirective,
+  isSameDirectory,
   mergeTurns,
   setupV2,
   SUPERMEMORY_RECALL_TOOL_NAME,
@@ -16,6 +17,7 @@ import {
   type RequestMessage,
   type TranscriptMessage,
   type V2Context,
+  type V2Event,
   type V2RuntimeDependencies,
 } from "./runtime.js";
 
@@ -134,12 +136,24 @@ interface Harness {
   writes: Array<{ customId?: string; timeoutMs?: number; metadata?: Record<string, unknown> }>;
   adds: Array<{ content: string; customId?: string; metadata?: Record<string, unknown> }>;
   emitted: Array<{ kind?: unknown; message?: unknown }>;
+  sessionLookups: string[];
   transcript: TranscriptMessage[];
+}
+
+interface HarnessOptions {
+  /** The plugin instance's location. */
+  directory?: string;
+  /** Directory OpenCode reports for a session; throw to simulate a failed lookup. */
+  sessionDirectory?: (sessionID: string) => string;
 }
 
 function harness(
   config: Partial<V2RuntimeDependencies["config"]> = {},
+  options: HarnessOptions = {},
 ): Harness {
+  const directory = options.directory ?? "/repo";
+  const sessionDirectory = options.sessionDirectory ?? (() => directory);
+  const sessionLookups: string[] = [];
   const tools = new Map<string, FakeTool>();
   const hooks: Harness["hooks"] = {};
   const queries: string[] = [];
@@ -150,7 +164,7 @@ function harness(
   const registration = { dispose: async () => undefined };
 
   const ctx = {
-    location: { directory: "/repo" },
+    location: { directory },
     tool: {
       transform: async (callback: (editor: unknown) => void) => {
         callback({
@@ -177,10 +191,10 @@ function harness(
         hooks[`session.${name}`] = callback;
         return registration;
       },
-      get: async ({ sessionID }: { sessionID: string }) => ({
-        id: sessionID,
-        location: { directory: "/repo" },
-      }),
+      get: async ({ sessionID }: { sessionID: string }) => {
+        sessionLookups.push(sessionID);
+        return { id: sessionID, location: { directory: sessionDirectory(sessionID) } };
+      },
       context: async () => state.transcript,
     },
     permission: {
@@ -282,6 +296,7 @@ function harness(
     writes,
     adds,
     emitted,
+    sessionLookups,
     get transcript() {
       return state.transcript;
     },
@@ -537,6 +552,114 @@ function ownerFor(directory: string): { generation: number } | undefined {
     >
   )[Symbol.for(`opencode-supermemory.v2.owner:${directory}`)];
 }
+
+describe("OpenCode 2 runtime session ownership", () => {
+  // OpenCode delivers every location's events to every plugin instance, so two
+  // runtimes for different directories both receive each event below.
+  const directories: Record<string, string> = {
+    "ses-a": "/repo-a",
+    "ses-b": "/repo-b",
+  };
+  const lookup = (sessionID: string) => {
+    const directory = directories[sessionID];
+    if (!directory) throw new Error(`Session not found: ${sessionID}`);
+    return directory;
+  };
+  const pair = () => {
+    const a = harness({}, { directory: "/repo-a", sessionDirectory: lookup });
+    const b = harness({}, { directory: "/repo-b", sessionDirectory: lookup });
+    a.transcript = [user("u1", "question 1"), assistant("a1", "answer 1")];
+    b.transcript = a.transcript;
+    return { a, b };
+  };
+  const broadcast = async (runtimes: V2Runtime[], event: V2Event) => {
+    for (const runtime of runtimes) await runtime.handleEvent(event);
+    await Promise.all(runtimes.map((runtime) => runtime.idle()));
+  };
+
+  test("captures a session only in the runtime for its directory", async () => {
+    const { a, b } = pair();
+    await a.runtime.register();
+    await b.runtime.register();
+
+    await broadcast([a.runtime, b.runtime], {
+      id: "e1",
+      type: "session.execution.succeeded",
+      data: { sessionID: "ses-a" },
+    });
+    await broadcast([a.runtime, b.runtime], {
+      id: "e2",
+      type: "session.execution.succeeded",
+      data: { sessionID: "ses-b" },
+    });
+
+    expect(a.writes.map((write) => write.metadata?.sessionId)).toEqual(["ses-a"]);
+    expect(b.writes.map((write) => write.metadata?.sessionId)).toEqual(["ses-b"]);
+    a.runtime.cleanup();
+    b.runtime.cleanup();
+  });
+
+  test("caches ownership per session and trusts sessions it already serves", async () => {
+    const { a, b } = pair();
+    await a.runtime.register();
+    await b.runtime.register();
+
+    // ses-a reached runtime A through its directory-scoped context hook.
+    await a.runtime.handleContext({
+      sessionID: "ses-a",
+      messages: [request("u1", "continue the auth flow work from before")],
+    });
+    const lookupsBefore = a.sessionLookups.length;
+
+    for (const id of ["e1", "e2", "e3"]) {
+      await broadcast([a.runtime, b.runtime], {
+        id,
+        type: "session.execution.succeeded",
+        data: { sessionID: "ses-a" },
+      });
+    }
+
+    expect(a.sessionLookups.length).toBe(lookupsBefore);
+    expect(b.sessionLookups).toEqual(["ses-a"]);
+    expect(b.writes).toHaveLength(0);
+    expect(a.writes).toHaveLength(1);
+    a.runtime.cleanup();
+    b.runtime.cleanup();
+  });
+
+  test("uses the event location when present and skips sessions it cannot place", async () => {
+    const { a, b } = pair();
+    await a.runtime.register();
+    await b.runtime.register();
+
+    const summary = "Summary ".repeat(20);
+    await broadcast([a.runtime, b.runtime], {
+      id: "e1",
+      type: "session.compaction.ended",
+      data: { sessionID: "ses-b", text: summary, reason: "auto" },
+      location: { directory: "/repo-b/" },
+    });
+    expect(a.adds).toHaveLength(0);
+    expect(b.adds).toHaveLength(1);
+    expect(a.sessionLookups).not.toContain("ses-b");
+
+    await broadcast([a.runtime, b.runtime], {
+      id: "e2",
+      type: "session.execution.succeeded",
+      data: { sessionID: "ses-unknown" },
+    });
+    expect(a.writes).toHaveLength(0);
+    expect(b.writes).toHaveLength(0);
+    a.runtime.cleanup();
+    b.runtime.cleanup();
+  });
+
+  test("compares directories after normalizing them", () => {
+    expect(isSameDirectory("/repo-a/", "/repo-a")).toBe(true);
+    expect(isSameDirectory("/repo-a/../repo-a", "/repo-a")).toBe(true);
+    expect(isSameDirectory("/repo-a", "/repo-ab")).toBe(false);
+  });
+});
 
 describe("OpenCode 2 runtime ownership", () => {
   test("each project directory owns its runtime; hot reload replaces only the same directory", async () => {

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { resolve } from "node:path";
 
 import type { Plugin } from "@opencode/plugin";
 import type { SessionHooks } from "@opencode/plugin/promise/session";
@@ -61,6 +62,19 @@ const INLINE_CODE_PATTERN = /`[^`]+`/g;
 const SYNTHETIC_METADATA_KEY = "supermemory";
 const UPDATE_COMMAND = "bunx opencode-supermemory@latest install";
 const MAX_DISPATCHES_PER_SESSION = 8;
+const MAX_TRACKED_SESSION_OWNERS = 1_000;
+
+/**
+ * Session events this runtime acts on. OpenCode delivers every location's
+ * events to every plugin instance, so these are only handled for sessions in
+ * this instance's own directory.
+ */
+const OWNED_SESSION_EVENTS = new Set([
+  "session.execution.succeeded",
+  "session.execution.interrupted",
+  "session.deleted",
+  "session.compaction.ended",
+]);
 const MIN_SUMMARY_CHARS = 100;
 
 export const SUPERMEMORY_TOOL_NAME = "supermemory";
@@ -150,6 +164,7 @@ export interface V2Event {
   id?: string;
   type: string;
   data?: Record<string, unknown>;
+  location?: { directory?: string };
 }
 
 /** Minimal shape of a persisted OpenCode 2 transcript message. */
@@ -196,6 +211,15 @@ function mergeDependencies(
     ...overrides,
     config: { ...DEFAULT_DEPENDENCIES.config, ...overrides?.config },
   };
+}
+
+function normalizeDirectory(directory: string): string {
+  const resolved = resolve(directory).replace(/[\\/]+$/, "") || resolve(directory);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+export function isSameDirectory(left: string, right: string): boolean {
+  return normalizeDirectory(left) === normalizeDirectory(right);
 }
 
 function sha256(value: string): string {
@@ -442,6 +466,8 @@ export class V2Runtime {
   readonly #pendingSummaries = new Map<string, PendingSummary>();
   readonly #summaryInFlight = new Set<string>();
   readonly #deduper = new EventDeduper();
+  readonly #sessionOwners = new Map<string, boolean>();
+  readonly #ownerLookups = new Map<string, Promise<boolean>>();
   readonly #registrations: Registration[] = [];
   readonly #abortController = new AbortController();
   #emitActivity: ((notice: MemoryActivityNotice) => void) | undefined;
@@ -702,6 +728,16 @@ export class V2Runtime {
     if (!this.active || this.#deduper.hasSeen(event.id)) return;
     const sessionID = this.#eventSessionID(event);
 
+    if (
+      sessionID &&
+      OWNED_SESSION_EVENTS.has(event.type) &&
+      !(await this.#ownsSession(sessionID, event))
+    ) {
+      if (event.type === "session.deleted") this.#sessionOwners.delete(sessionID);
+      return;
+    }
+    if (!this.active) return;
+
     if (sessionID && event.type !== "session.compaction.ended") {
       void this.#retryPendingSummaries(sessionID);
     }
@@ -728,6 +764,7 @@ export class V2Runtime {
         if (!sessionID) return;
         const state = this.#states.get(sessionID);
         this.#recall.delete(sessionID);
+        this.#sessionOwners.delete(sessionID);
         if (!state) return;
         await this.#runCaptureExclusive(sessionID, () =>
           this.#captureSessionEnd(sessionID),
@@ -796,6 +833,60 @@ export class V2Runtime {
       return;
     }
     this.#registrations.push(registration);
+  }
+
+  /**
+   * Whether a session belongs to this instance's directory. Hooks and tools
+   * are already scoped to the directory, so any session with state here is
+   * ours. Otherwise the event's location decides, and events without one fall
+   * back to a single session lookup that is cached per session.
+   */
+  async #ownsSession(sessionID: string, event: V2Event): Promise<boolean> {
+    const own = this.#ctx.location?.directory;
+    if (!own || this.#states.has(sessionID)) return true;
+
+    const known = this.#sessionOwners.get(sessionID);
+    if (known !== undefined) return known;
+
+    const eventDirectory = event.location?.directory;
+    if (eventDirectory) {
+      return this.#rememberOwner(sessionID, isSameDirectory(eventDirectory, own));
+    }
+
+    const pending = this.#ownerLookups.get(sessionID);
+    if (pending) return pending;
+
+    const lookup = (async () => {
+      try {
+        const session = await this.#ctx.session.get({ sessionID });
+        const directory = (session as { location?: { directory?: string } })
+          .location?.directory;
+        if (!directory) return false;
+        return this.#rememberOwner(sessionID, isSameDirectory(directory, own));
+      } catch (error) {
+        this.#deps.logger("v2 session owner lookup failed; skipping event", {
+          sessionID,
+          type: event.type,
+          error: String(error),
+        });
+        return false;
+      } finally {
+        this.#ownerLookups.delete(sessionID);
+      }
+    })();
+    this.#ownerLookups.set(sessionID, lookup);
+    return lookup;
+  }
+
+  #rememberOwner(sessionID: string, owned: boolean): boolean {
+    this.#sessionOwners.delete(sessionID);
+    this.#sessionOwners.set(sessionID, owned);
+    while (this.#sessionOwners.size > MAX_TRACKED_SESSION_OWNERS) {
+      const oldest = this.#sessionOwners.keys().next().value;
+      if (oldest === undefined) break;
+      this.#sessionOwners.delete(oldest);
+    }
+    return owned;
   }
 
   #state(sessionID: string): SessionState {
