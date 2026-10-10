@@ -654,6 +654,25 @@ describe("OpenCode 2 runtime session ownership", () => {
     b.runtime.cleanup();
   });
 
+  test("does not re-send saved batches when the runtime shuts down", async () => {
+    const h = harness({}, { directory: "/repo-a", sessionDirectory: lookup });
+    h.transcript = [user("u1", "question 1"), assistant("a1", "answer 1")];
+    await h.runtime.register();
+    await h.runtime.handleEvent({
+      id: "e1",
+      type: "session.execution.succeeded",
+      data: { sessionID: "ses-a" },
+    });
+    await h.runtime.idle();
+    expect(h.writes).toHaveLength(1);
+
+    h.transcript = [...h.transcript, user("u2", "question 2"), assistant("a2", "answer 2")];
+    h.runtime.cleanup();
+    await h.runtime.idle();
+    expect(h.writes).toHaveLength(2);
+    expect(h.writes[1]?.customId).not.toBe(h.writes[0]?.customId);
+  });
+
   test("compares directories after normalizing them", () => {
     expect(isSameDirectory("/repo-a/", "/repo-a")).toBe(true);
     expect(isSameDirectory("/repo-a/../repo-a", "/repo-a")).toBe(true);

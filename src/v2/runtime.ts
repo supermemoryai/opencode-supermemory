@@ -815,11 +815,16 @@ export class V2Runtime {
     this.#active = false;
     this.#abortController.abort();
 
-    void this.#flushAll(true).catch((error) => {
-      this.#deps.logger("v2 cleanup capture failed", { error: String(error) });
-    });
-    this.#states.clear();
-    this.#recall.clear();
+    // Flush while the session state still records which batches were saved,
+    // so only unsaved turns are sent; clearing first would re-send them all.
+    void this.#flushAll(true)
+      .catch((error) => {
+        this.#deps.logger("v2 cleanup capture failed", { error: String(error) });
+      })
+      .finally(() => {
+        this.#states.clear();
+        this.#recall.clear();
+      });
 
     for (const registration of this.#registrations.splice(0)) {
       this.#disposeRegistration(registration);
