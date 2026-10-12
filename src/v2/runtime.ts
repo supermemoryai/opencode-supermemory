@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import type { Plugin } from "@opencode/plugin";
 import type { SessionHooks } from "@opencode/plugin/promise/session";
 
-import { CONFIG, getApiBaseUrl, getApiVersion, isConfigured, PLUGIN_VERSION } from "../config.js";
+import { CONFIG, getApiBaseUrl, getApiVersion, isConfigured, PLUGIN_VERSION, SUPERMEMORY_API_KEY } from "../config.js";
 import {
   createMemoryActivityReporterFromSink,
   type MemoryActivityNotice,
@@ -14,7 +14,6 @@ import {
   AUTOMATIC_CAPTURE_TIMEOUT_MS,
   buildCadenceBatches,
   buildSessionEndBatch,
-  getCaptureId,
   type CaptureBatch,
   type CaptureTurn,
 } from "../services/capture.js";
@@ -50,6 +49,8 @@ import {
 import { getTags, type ResolvedTags } from "../services/tags.js";
 import { checkNpmUpdate, type UpdateInfo } from "../services/version-check.js";
 import { SUPERMEMORY_RPC } from "../rpc.js";
+import { planCapture } from "./capture-plan.js";
+import { parseCaptureAcknowledgements, parseCaptureQueue, queueCaptureGroup, type PendingCaptureGroup } from "./capture-queue.js";
 
 export type V2Context = Plugin.Context;
 type SessionContextEvent = SessionHooks["context"];
@@ -113,7 +114,7 @@ type RuntimeMemoryClient = Pick<
   | "searchMemoriesMany"
   | "listMemoriesScoped"
   | "deleteMemory"
->;
+> & Partial<Pick<SupermemoryClient, "getCaptureDestination">>;
 
 type RuntimeConfig = Pick<
   typeof CONFIG,
@@ -181,7 +182,12 @@ interface SessionState {
   acknowledgedTurnFingerprints: Set<string>;
   captureLedgerLoaded?: Promise<void>;
   captureLedgerKey?: string;
+  legacyCaptureLedgerKey?: string;
   captureLedgerDirty: boolean;
+  pendingCaptures: Map<string, PendingCaptureGroup>;
+  pendingCaptureKey?: string;
+  pendingCaptureAccount?: string;
+  pendingCaptureDirty: boolean;
 }
 
 interface PendingSummary {
@@ -191,6 +197,8 @@ interface PendingSummary {
 }
 
 interface CaptureHandoff {
+  version?: 2;
+  account?: string;
   sessions: Array<{
     sessionID: string;
     directory?: string;
@@ -200,7 +208,12 @@ interface CaptureHandoff {
     captureIds: string[];
     turnFingerprints: string[];
     ledgerKey?: string;
+    legacyLedgerKey?: string;
     dirty: boolean;
+    pending?: PendingCaptureGroup[];
+    pendingKey?: string;
+    pendingAccount?: string;
+    pendingDirty?: boolean;
   }>;
   summaries: PendingSummary[];
 }
@@ -474,10 +487,12 @@ export class V2Runtime {
   readonly #registrations: Registration[] = [];
   readonly #registrationTasks = new Set<Promise<void>>();
   readonly #abortController = new AbortController();
+  readonly #captureAccount = sha256(SUPERMEMORY_API_KEY ?? "unconfigured");
   #emitActivity: ((notice: MemoryActivityNotice) => void) | undefined;
   #activity: MemoryActivityReporter;
   #active = true;
   #cleanup: Promise<void> | undefined;
+  #recoveryTask: Promise<void> | undefined;
 
   constructor(
     ctx: V2Context,
@@ -613,7 +628,14 @@ export class V2Runtime {
       });
     }
 
-    if (this.active) this.#startEventSubscription();
+    if (this.active) {
+      this.#startEventSubscription();
+      const task = this.#restorePendingSessions();
+      this.#recoveryTask = task;
+      void task.finally(() => {
+        if (this.#recoveryTask === task) this.#recoveryTask = undefined;
+      }).catch(() => logger("[capture] pending recovery deferred; originals retained"));
+    }
     logger("v2 plugin registered", {
       tools: [SUPERMEMORY_TOOL_NAME, SUPERMEMORY_RECALL_TOOL_NAME],
       hooks: ["session.context", "session.compaction", "permission.evaluate", "tool.execute"],
@@ -771,6 +793,7 @@ export class V2Runtime {
         this.#recall.delete(sessionID);
         if (!state) return;
         state.deleted = true;
+        if (state.pendingCaptures.size > 0) state.pendingCaptureDirty = true;
         if (await this.#finishSession(sessionID)) {
           this.#states.delete(sessionID);
           this.#sessionOwners.delete(sessionID);
@@ -810,8 +833,11 @@ export class V2Runtime {
 
   /** Waits for background capture and summary work; used by tests and shutdown. */
   async idle(): Promise<void> {
-    while (this.#captureInFlight.size > 0 || this.#summaryTasks.size > 0) {
-      await Promise.allSettled([...this.#captureInFlight.values(), ...this.#summaryTasks.values()]);
+    while (this.#captureInFlight.size > 0 || this.#summaryTasks.size > 0 || this.#recoveryTask) {
+      await Promise.allSettled([
+        ...this.#captureInFlight.values(), ...this.#summaryTasks.values(),
+        ...(this.#recoveryTask ? [this.#recoveryTask] : []),
+      ]);
     }
   }
 
@@ -855,6 +881,8 @@ export class V2Runtime {
 
   takeCaptureState(): CaptureHandoff {
     const snapshot: CaptureHandoff = {
+      version: 2,
+      account: this.#captureAccount,
       sessions: [...this.#states].map(([sessionID, state]) => ({
         sessionID,
         directory: state.directory,
@@ -864,7 +892,12 @@ export class V2Runtime {
         captureIds: [...state.acknowledgedCaptureIds],
         turnFingerprints: [...state.acknowledgedTurnFingerprints],
         ledgerKey: state.captureLedgerKey,
+        legacyLedgerKey: state.legacyCaptureLedgerKey,
         dirty: state.captureLedgerDirty,
+        pending: [...state.pendingCaptures.values()],
+        pendingKey: state.pendingCaptureKey,
+        pendingAccount: state.pendingCaptureAccount,
+        pendingDirty: state.pendingCaptureDirty,
       })),
       summaries: [...this.#pendingSummaries.values()],
     };
@@ -881,10 +914,16 @@ export class V2Runtime {
       state.tags = source.tags;
       state.turns = source.turns;
       state.turnIndex = new Map(source.turns.map((turn, index) => [turn.id, index]));
-      state.acknowledgedCaptureIds = new Set(source.captureIds);
+      state.acknowledgedCaptureIds = new Set(source.captureIds.filter((id) =>
+        snapshot.version === 2 || id.startsWith("opencode:compaction:")));
       state.acknowledgedTurnFingerprints = new Set(source.turnFingerprints);
-      state.captureLedgerKey = source.ledgerKey;
+      state.captureLedgerKey = snapshot.version === 2 ? source.ledgerKey : undefined;
+      state.legacyCaptureLedgerKey = snapshot.version === 2 ? source.legacyLedgerKey : source.ledgerKey;
       state.captureLedgerDirty = source.dirty;
+      state.pendingCaptures = new Map((source.pending ?? []).map((group) => [group.id, group]));
+      state.pendingCaptureKey = source.pendingKey;
+      state.pendingCaptureAccount = source.pendingAccount ?? snapshot.account;
+      state.pendingCaptureDirty = source.pendingDirty ?? false;
     }
     for (const summary of snapshot.summaries) this.#pendingSummaries.set(summary.customId, summary);
   }
@@ -939,6 +978,8 @@ export class V2Runtime {
       acknowledgedCaptureIds: new Set(),
       acknowledgedTurnFingerprints: new Set(),
       captureLedgerDirty: false,
+      pendingCaptures: new Map(),
+      pendingCaptureDirty: false,
     };
     this.#states.set(sessionID, state);
     return state;
@@ -1148,107 +1189,154 @@ export class V2Runtime {
     return state.turns;
   }
 
-  async #saveBatch(
+  #queueBatch(
     sessionID: string,
     state: SessionState,
     batch: CaptureBatch,
     reason: "cadence" | "session_end",
-  ): Promise<boolean> {
-    const remaining = batch.turns.filter((turn) =>
-      turn.messages.length > 0 && !state.acknowledgedTurnFingerprints.has(sha256(JSON.stringify(turn))));
-    if (remaining.length === 0) return true;
+  ): void {
+    const queued = new Set([...state.pendingCaptures.values()].flatMap((group) => group.turnFingerprints));
+    const remaining = batch.turns.filter((turn) => {
+      const fingerprint = sha256(JSON.stringify(turn));
+      return turn.messages.length > 0 && !state.acknowledgedTurnFingerprints.has(fingerprint) && !queued.has(fingerprint);
+    });
+    if (remaining.length === 0) return;
+    const positions = remaining.map((turn) => batch.startTurn + batch.turns.indexOf(turn));
     batch = {
       startTurn: batch.startTurn + batch.turns.indexOf(remaining[0]!),
       endTurn: batch.startTurn + batch.turns.indexOf(remaining.at(-1)!),
       turns: remaining,
     };
-    const captureId = getCaptureId(sessionID, batch);
-    const messages = batch.turns.flatMap((turn) => turn.messages);
-    const acknowledgedId = `${captureId}:${sha256(JSON.stringify(messages))}`;
-    if (state.acknowledgedCaptureIds.has(acknowledgedId)) return true;
-
-    let result: { success: boolean; error?: string; submittedMessageCount?: number };
-    try {
-      const tags = await this.#resolveSession(sessionID);
-      result = await this.#deps.memoryClient.ingestConversation(
-        `${sessionID}:${batch.startTurn}-${batch.endTurn}`,
-        messages,
-        [tags.canonical],
-        {
-          project: tags.projectName,
-          sm_project_id: tags.projectId,
-          sm_scope: "personal",
-          sm_capture_mode: "automatic",
-          captureReason: reason,
-          sessionId: sessionID,
-          turnStart: batch.startTurn,
-          turnEnd: batch.endTurn,
-        },
-        {
-          defaultEntityContext: AGENT_ENTITY_CONTEXT,
-          customId: captureId,
-          timeoutMs: AUTOMATIC_CAPTURE_TIMEOUT_MS,
-        },
-      );
-    } catch (error) {
-      result = {
-        success: false,
-        error: error instanceof Error ? error.message : String(error),
-      };
+    const groups = planCapture(sessionID, batch, positions);
+    for (const planned of groups) {
+      const group = queueCaptureGroup(planned, reason);
+      if (!state.pendingCaptures.has(group.id)) {
+        state.pendingCaptures.set(group.id, group);
+        state.pendingCaptureAccount = this.#captureAccount;
+        state.pendingCaptureDirty = true;
+      }
     }
+  }
 
-    if (result.success) {
-      const submittedMessageCount = result.submittedMessageCount ?? messages.length;
-      state.acknowledgedCaptureIds.add(acknowledgedId);
-      let messageCount = 0;
-      for (const turn of batch.turns) {
-        messageCount += turn.messages.length;
-        if (messageCount <= submittedMessageCount) {
-          state.acknowledgedTurnFingerprints.add(sha256(JSON.stringify(turn)));
+  async #drainCaptureQueue(sessionID: string, state: SessionState): Promise<boolean> {
+    await this.#persistCaptureLedger(sessionID, state);
+    if (!(await this.#persistPendingCaptures(sessionID, state))) return false;
+    const tags = await this.#resolveSession(sessionID);
+    let complete = true;
+    for (const group of [...state.pendingCaptures.values()]) {
+      const reason = group.reason;
+      for (const piece of group.pieces) {
+        if (state.acknowledgedCaptureIds.has(piece.acknowledgedId)) continue;
+        await this.#persistCaptureLedger(sessionID, state);
+        if (!(await this.#persistPendingCaptures(sessionID, state))) return false;
+        if (state.acknowledgedCaptureIds.has(piece.acknowledgedId)) continue;
+        let result: { success: boolean; error?: string; submittedMessageCount?: number };
+        try {
+          this.#captureDestination();
+          result = await this.#deps.memoryClient.ingestConversation(
+            piece.conversationId,
+            piece.messages,
+            [tags.canonical],
+            {
+              project: tags.projectName,
+              sm_project_id: tags.projectId,
+              sm_scope: "personal",
+              sm_capture_mode: "automatic",
+              captureReason: reason,
+              sessionId: sessionID,
+              turnStart: piece.startTurn,
+              turnEnd: piece.endTurn,
+              ...piece.metadata,
+            },
+            {
+              defaultEntityContext: AGENT_ENTITY_CONTEXT,
+              customId: piece.id,
+              timeoutMs: AUTOMATIC_CAPTURE_TIMEOUT_MS,
+              requireComplete: true,
+              preserveWhitespace: piece.preserveWhitespace,
+            },
+          );
+        } catch (error) {
+          result = { success: false, error: error instanceof Error ? error.message : String(error) };
+        }
+        if (result.success &&
+            (result.submittedMessageCount ?? piece.messages.length) === piece.messages.length) {
+          state.acknowledgedCaptureIds.add(piece.acknowledgedId);
+          state.captureLedgerDirty = true;
+          await this.#persistCaptureLedger(sessionID, state);
+          this.#deps.logger("[capture] conversation piece saved", {
+            sessionID, reason, captureId: piece.id,
+            startTurn: piece.startTurn, endTurn: piece.endTurn,
+          });
+        } else {
+          this.#deps.logger("[capture] failed to save complete conversation piece", {
+            sessionID, reason, captureId: piece.id,
+          });
         }
       }
-      state.captureLedgerDirty = true;
       await this.#persistCaptureLedger(sessionID, state);
-      this.#activity.saved();
-      this.#deps.logger("[capture] conversation batch saved", {
-        sessionID,
-        reason,
-        startTurn: batch.startTurn,
-        endTurn: batch.endTurn,
-      });
-      return true;
+      if (!state.captureLedgerDirty) {
+        const pending = group.pieces.filter((piece) => !state.acknowledgedCaptureIds.has(piece.acknowledgedId));
+        if (pending.length !== group.pieces.length) {
+          group.pieces = pending;
+          state.pendingCaptureDirty = true;
+          if (!(await this.#persistPendingCaptures(sessionID, state))) return false;
+        }
+      }
+      if (group.pieceIds.every((id) => state.acknowledgedCaptureIds.has(id))) {
+        const newlyComplete = group.turnFingerprints.some((fingerprint) => !state.acknowledgedTurnFingerprints.has(fingerprint));
+        for (const fingerprint of group.turnFingerprints) state.acknowledgedTurnFingerprints.add(fingerprint);
+        state.captureLedgerDirty = true;
+        await this.#persistCaptureLedger(sessionID, state);
+        if (newlyComplete) this.#activity.saved();
+        if (!state.captureLedgerDirty) {
+          state.pendingCaptures.delete(group.id);
+          state.pendingCaptureDirty = true;
+          if (!(await this.#persistPendingCaptures(sessionID, state))) return false;
+        }
+      } else {
+        complete = false;
+      }
     }
-
-    this.#deps.logger("[capture] failed to save conversation batch", {
-      sessionID,
-      reason,
-      startTurn: batch.startTurn,
-      endTurn: batch.endTurn,
-      error: result.error,
-    });
-    return false;
+    return complete && !state.captureLedgerDirty && !state.pendingCaptureDirty;
   }
 
   async #loadCaptureLedger(sessionID: string, state: SessionState): Promise<void> {
+    const destination = this.#captureDestination();
     if (!this.#ctx.storage) return;
     state.captureLedgerLoaded ??= (async () => {
       const tags = await this.#resolveSession(sessionID);
+      if (tags.canonical !== this.#deps.resolveTags(this.#ctx.location.directory).canonical) {
+        throw new Error("Capture namespace context changed; pending originals retained");
+      }
       const scope = sha256(JSON.stringify([
-        getApiBaseUrl(), getApiVersion(), normalizeDirectory(state.directory!),
+        destination.baseUrl, destination.apiVersion, normalizeDirectory(state.directory!),
         tags.canonical, sessionID,
       ]));
-      state.captureLedgerKey = `capture-acks:v1:${scope}`;
-      const saved = await this.#ctx.storage.get(state.captureLedgerKey) as Record<string, unknown> | undefined;
-      if (saved === undefined) return;
-      if (!saved || Array.isArray(saved) || typeof saved !== "object" ||
-          saved.version !== 1 || saved.scope !== scope ||
-          !Array.isArray(saved.captureIds) || !Array.isArray(saved.turnIds) ||
-          !saved.captureIds.every((id) => typeof id === "string" && /^opencode:(capture|compaction):[a-f0-9]{64}:[a-f0-9]{64}$/.test(id)) ||
-          !saved.turnIds.every((id) => typeof id === "string" && /^[a-f0-9]{64}$/.test(id))) {
-        throw new Error(`Invalid capture acknowledgement ledger for ${sessionID}`);
+      const previousKeys = [state.captureLedgerKey, state.legacyCaptureLedgerKey];
+      const hasProgress = state.pendingCaptures.size > 0 || state.acknowledgedCaptureIds.size > 0 ||
+        state.acknowledgedTurnFingerprints.size > 0 || state.captureLedgerDirty || state.pendingCaptureDirty ||
+        [...this.#pendingSummaries.values()].some((summary) => summary.sessionID === sessionID);
+      if (hasProgress &&
+          ((state.pendingCaptureAccount !== undefined && state.pendingCaptureAccount !== this.#captureAccount) ||
+           previousKeys.some((key) => key !== undefined && key !== `capture-acks:v2:${scope}` && key !== `capture-acks:v1:${scope}`))) {
+        throw new Error("Capture progress destination or credential context changed; originals retained");
       }
-      for (const id of saved.captureIds) state.acknowledgedCaptureIds.add(id as string);
-      for (const id of saved.turnIds) state.acknowledgedTurnFingerprints.add(id as string);
+      state.captureLedgerKey = `capture-acks:v2:${scope}`;
+      state.legacyCaptureLedgerKey = `capture-acks:v1:${scope}`;
+      const read = async (key: string, version: 1 | 2) => parseCaptureAcknowledgements(
+        await this.#ctx.storage.get(key), scope, this.#captureAccount, version,
+      );
+      const current = await read(state.captureLedgerKey, 2);
+      const saved = current ?? await read(state.legacyCaptureLedgerKey, 1);
+      if (saved) {
+        for (const id of saved.captureIds) {
+          if (current || id.startsWith("opencode:compaction:")) state.acknowledgedCaptureIds.add(id);
+        }
+        for (const id of saved.turnIds) state.acknowledgedTurnFingerprints.add(id);
+        if (!current) state.captureLedgerDirty = true;
+      }
+      await this.#loadPendingCaptures(sessionID, state, scope);
     })();
     try {
       await state.captureLedgerLoaded;
@@ -1263,20 +1351,143 @@ export class V2Runtime {
       state.captureLedgerDirty = false;
       return;
     }
-    if (!state.captureLedgerDirty || !state.captureLedgerKey) return;
+    if (!state.captureLedgerKey) return;
+    const scope = state.captureLedgerKey.slice("capture-acks:v2:".length);
+    const saved = parseCaptureAcknowledgements(await this.#ctx.storage.get(state.captureLedgerKey), scope, this.#captureAccount, 2);
+    const captureIds = new Set(saved?.captureIds ?? []);
+    const turnIds = new Set(saved?.turnIds ?? []);
+    if ([...state.acknowledgedCaptureIds].some((id) => !captureIds.has(id)) ||
+        [...state.acknowledgedTurnFingerprints].some((id) => !turnIds.has(id))) state.captureLedgerDirty = true;
+    for (const id of captureIds) state.acknowledgedCaptureIds.add(id);
+    for (const id of turnIds) state.acknowledgedTurnFingerprints.add(id);
+    if (!state.captureLedgerDirty) return;
     try {
       await this.#ctx.storage.set(state.captureLedgerKey, {
-        version: 1,
-        scope: state.captureLedgerKey.slice("capture-acks:v1:".length),
+        version: 2,
+        account: this.#captureAccount,
+        scope,
         captureIds: [...state.acknowledgedCaptureIds],
         turnIds: [...state.acknowledgedTurnFingerprints],
       });
       state.captureLedgerDirty = false;
-    } catch (error) {
+    } catch {
       this.#deps.logger("[capture] acknowledgement persistence failed; retaining in-memory ACKs", {
-        sessionID, error: String(error),
+        sessionID,
       });
     }
+  }
+
+  #pendingProjectPrefix(): string {
+    return `capture-pending:v1:${sha256(normalizeDirectory(this.#ctx.location.directory))}:`;
+  }
+
+  #captureDestination(): { baseUrl: string; apiVersion: "legacy" | "v5" } {
+    const current = { baseUrl: getApiBaseUrl(), apiVersion: getApiVersion(), account: this.#captureAccount };
+    if (this.#ctx.storage && !this.#deps.memoryClient.getCaptureDestination) {
+      throw new Error("Capture transport provenance unavailable; originals retained");
+    }
+    const bound = this.#deps.memoryClient.getCaptureDestination?.() ?? current;
+    if (current.baseUrl !== bound.baseUrl || current.apiVersion !== bound.apiVersion || current.account !== bound.account) {
+      throw new Error("Capture destination changed; reinitialize the client before retrying; originals retained");
+    }
+    return bound;
+  }
+
+  async #loadPendingCaptures(sessionID: string, state: SessionState, scope: string): Promise<void> {
+    const prefix = `${this.#pendingProjectPrefix()}${sha256(sessionID)}:`;
+    const key = `${prefix}${scope}`;
+    if (state.pendingCaptures.size > 0 &&
+        ((state.pendingCaptureKey !== undefined && state.pendingCaptureKey !== key) ||
+         (state.pendingCaptureAccount !== undefined && state.pendingCaptureAccount !== this.#captureAccount))) {
+      throw new Error("Pending capture destination or credential context changed; originals retained");
+    }
+    state.pendingCaptureKey = key;
+    state.pendingCaptureAccount = this.#captureAccount;
+    let after: string | undefined;
+    do {
+      const page = await this.#ctx.storage.scan({ prefix, after });
+      for (const entry of page.entries) {
+        if (entry.key !== key) throw new Error("Pending capture destination changed; originals retained");
+        const saved = parseCaptureQueue(entry.value, scope, this.#captureAccount, sessionID, state.acknowledgedCaptureIds);
+        state.deleted ||= saved.deleted;
+        for (const group of saved.groups) {
+          if (!state.pendingCaptures.has(group.id)) state.pendingCaptures.set(group.id, group);
+        }
+      }
+      after = page.next;
+    } while (after);
+  }
+
+  async #persistPendingCaptures(sessionID: string, state: SessionState): Promise<boolean> {
+    if (!this.#ctx.storage) {
+      state.pendingCaptureDirty = false;
+      return true;
+    }
+    if (!state.pendingCaptureKey || !state.captureLedgerKey) return false;
+    try {
+      const scope = state.captureLedgerKey.slice("capture-acks:v2:".length);
+      const progress = parseCaptureAcknowledgements(await this.#ctx.storage.get(state.captureLedgerKey), scope, this.#captureAccount, 2);
+      const durableIds = new Set(progress?.captureIds ?? []);
+      const durableTurns = new Set(progress?.turnIds ?? []);
+      const original = await this.#ctx.storage.get(state.pendingCaptureKey);
+      if (original !== undefined) {
+        const saved = parseCaptureQueue(original, scope, this.#captureAccount, sessionID, durableIds);
+        if (saved.groups.some((group) => !state.pendingCaptures.has(group.id) &&
+            (!group.pieceIds.every((id) => durableIds.has(id)) ||
+             !group.turnFingerprints.every((id) => durableTurns.has(id))))) {
+          throw new Error("Pending group completion is not durably committed; originals retained");
+        }
+      }
+      if (!state.pendingCaptureDirty) return true;
+      if (state.pendingCaptures.size === 0) {
+        await this.#ctx.storage.remove(state.pendingCaptureKey);
+      } else {
+        const value = {
+          version: 1,
+          scope,
+          account: this.#captureAccount,
+          sessionID,
+          deleted: state.deleted === true,
+          groups: [...state.pendingCaptures.values()],
+        };
+        parseCaptureQueue(value, value.scope, value.account, sessionID, durableIds);
+        await this.#ctx.storage.set(state.pendingCaptureKey, JSON.parse(JSON.stringify(value)));
+      }
+      state.pendingCaptureDirty = false;
+      return true;
+    } catch {
+      this.#deps.logger("[capture] pending checkpoint failed; retaining selected content", {
+        sessionID,
+      });
+      return false;
+    }
+  }
+
+  async #restorePendingSessions(): Promise<void> {
+    if (!this.#ctx.storage) return;
+    const prefix = this.#pendingProjectPrefix();
+    let after: string | undefined;
+    do {
+      const page = await this.#ctx.storage.scan({ prefix, after });
+      for (const entry of page.entries) {
+        if (!this.active) return;
+        try {
+          const value = entry.value as Record<string, unknown> | null;
+          if (!value || typeof value.sessionID !== "string" || value.sessionID.length === 0 || value.sessionID.length > 1024 ||
+              !entry.key.startsWith(`${prefix}${sha256(value.sessionID)}:`)) {
+            throw new Error("Invalid pending capture identity; originals retained");
+          }
+          const sessionID = value.sessionID;
+          const state = this.#state(sessionID);
+          state.directory ??= this.#ctx.location.directory;
+          state.tags ??= this.#deps.resolveTags(this.#ctx.location.directory);
+          await this.#finishSession(sessionID, { queuedOnly: true, forgetWhenComplete: true });
+        } catch {
+          this.#deps.logger("[capture] stored pending recovery deferred; originals retained");
+        }
+      }
+      after = page.next;
+    } while (after);
   }
 
   async #captureCadence(sessionID: string): Promise<void> {
@@ -1288,8 +1499,9 @@ export class V2Runtime {
       turns,
       this.#deps.config.captureEveryNTurns,
     )) {
-      await this.#saveBatch(sessionID, state, batch, "cadence");
+      this.#queueBatch(sessionID, state, batch, "cadence");
     }
+    await this.#drainCaptureQueue(sessionID, state);
   }
 
   async #captureSessionEnd(sessionID: string): Promise<boolean> {
@@ -1297,34 +1509,53 @@ export class V2Runtime {
     await this.#loadCaptureLedger(sessionID, state);
     await this.#persistCaptureLedger(sessionID, state);
     const turns = await this.#refreshTurns(sessionID, state);
-    let complete = true;
     for (const batch of buildCadenceBatches(
       turns,
       this.#deps.config.captureEveryNTurns,
     )) {
-      if (!(await this.#saveBatch(sessionID, state, batch, "cadence"))) complete = false;
+      this.#queueBatch(sessionID, state, batch, "cadence");
     }
     const finalBatch = buildSessionEndBatch(
       turns,
       this.#deps.config.captureEveryNTurns,
     );
     if (finalBatch) {
-      if (!(await this.#saveBatch(sessionID, state, finalBatch, "session_end"))) complete = false;
+      this.#queueBatch(sessionID, state, finalBatch, "session_end");
     }
-    return complete && !state.captureLedgerDirty;
+    const complete = await this.#drainCaptureQueue(sessionID, state);
+    return complete && !state.captureLedgerDirty && !state.pendingCaptureDirty && state.pendingCaptures.size === 0;
   }
 
-  async #finishSession(sessionID: string, allowInactive = false): Promise<boolean> {
-    await this.#retryPendingSummaries(sessionID, allowInactive);
+  async #finishSession(
+    sessionID: string,
+    options: { allowInactive?: boolean; queuedOnly?: boolean; forgetWhenComplete?: boolean } = {},
+  ): Promise<boolean> {
+    await this.#retryPendingSummaries(sessionID, options.allowInactive);
     let complete = false;
     await this.#runCaptureExclusive(sessionID, async () => {
-      if (!(await this.#captureSessionEnd(sessionID))) return;
+      if (options.queuedOnly) {
+        const state = this.#state(sessionID);
+        await this.#loadCaptureLedger(sessionID, state);
+        await this.#persistCaptureLedger(sessionID, state);
+        if (!(await this.#drainCaptureQueue(sessionID, state))) return;
+      } else if (!(await this.#captureSessionEnd(sessionID))) return;
       if ([...this.#pendingSummaries.values()].some((item) => item.sessionID === sessionID)) return;
       const state = this.#state(sessionID);
       if (state.deleted && state.captureLedgerKey && this.#ctx.storage) {
+        const scope = state.captureLedgerKey.slice("capture-acks:v2:".length);
+        parseCaptureAcknowledgements(await this.#ctx.storage.get(state.captureLedgerKey), scope, this.#captureAccount, 2);
+        if (state.legacyCaptureLedgerKey) {
+          parseCaptureAcknowledgements(await this.#ctx.storage.get(state.legacyCaptureLedgerKey), scope, this.#captureAccount, 1);
+        }
         await this.#ctx.storage.remove(state.captureLedgerKey);
+        if (state.legacyCaptureLedgerKey) await this.#ctx.storage.remove(state.legacyCaptureLedgerKey);
       }
       complete = true;
+      if (options.forgetWhenComplete && this.#states.get(sessionID) === state &&
+          state.pendingCaptures.size === 0 && !state.captureLedgerDirty && !state.pendingCaptureDirty) {
+        this.#states.delete(sessionID);
+        this.#recall.delete(sessionID);
+      }
     });
     return complete;
   }
@@ -1336,7 +1567,7 @@ export class V2Runtime {
     ]);
     const unfinished = new Set(sessions);
     await Promise.all([...sessions].map(async (sessionID) => {
-      if (await this.#finishSession(sessionID, allowInactive)) unfinished.delete(sessionID);
+      if (await this.#finishSession(sessionID, { allowInactive })) unfinished.delete(sessionID);
     }));
     return unfinished;
   }
@@ -1350,10 +1581,9 @@ export class V2Runtime {
     this.#captureInFlight.set(sessionID, next);
     try {
       await next;
-    } catch (error) {
+    } catch {
       this.#deps.logger("[capture] background capture failed", {
         sessionID,
-        error: String(error),
       });
     } finally {
       if (this.#captureInFlight.get(sessionID) === next) {

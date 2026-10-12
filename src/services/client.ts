@@ -1,4 +1,5 @@
 import Supermemory from "supermemory-legacy";
+import { createHash } from "node:crypto";
 import { V5Client } from "./v5-client.js";
 import {
   CONFIG,
@@ -9,6 +10,11 @@ import {
   isConfigured,
 } from "../config.js";
 import { log } from "./logger.js";
+import {
+  formatConversationContent,
+  formatConversationMessage,
+  MAX_CONVERSATION_CHARS,
+} from "./conversation.js";
 import {
   mergeListResponses,
   mergeProfileResponses,
@@ -23,7 +29,6 @@ import type {
 const TIMEOUT_MS = 30000;
 const TIMEOUT_BACKSTOP_GRACE_MS = 250;
 const SETTINGS_UPDATE_TIMEOUT_MS = 3_000;
-const MAX_CONVERSATION_CHARS = 100_000;
 const OPENCODE_SOURCE = "opencode";
 
 export interface MemoryRequestOptions {
@@ -128,35 +133,14 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 
 export class SupermemoryClient {
   private client: Supermemory | V5Client | null = null;
+  private captureDestination: { baseUrl: string; apiVersion: "legacy" | "v5"; account: string } | undefined;
 
-  private formatConversationMessage(message: ConversationMessage): string {
-    const content =
-      typeof message.content === "string"
-        ? message.content
-        : message.content
-            .map((part) =>
-              part.type === "text"
-                ? part.text
-                : `[image] ${part.imageUrl.url}`,
-            )
-            .join("\n");
-
-    const trimmed = content.trim();
-    if (trimmed.length === 0) {
-      return `[${message.role}]`;
-    }
-    return `[${message.role}] ${trimmed}`;
-  }
-
-  private formatConversationTranscript(
-    messages: ConversationMessage[],
-  ): string {
-    return messages
-      .map(
-        (message, idx) =>
-          `${idx + 1}. ${this.formatConversationMessage(message)}`,
-      )
-      .join("\n");
+  getCaptureDestination(): { baseUrl: string; apiVersion: "legacy" | "v5"; account: string } {
+    const bound = this.captureDestination ??= {
+      baseUrl: getApiBaseUrl(), apiVersion: getApiVersion(),
+      account: createHash("sha256").update(SUPERMEMORY_API_KEY ?? "unconfigured").digest("hex"),
+    };
+    return { ...bound };
   }
 
   private getClient(): Supermemory | V5Client {
@@ -164,16 +148,17 @@ export class SupermemoryClient {
       if (!isConfigured()) {
         throw new Error("SUPERMEMORY_API_KEY not set");
       }
+      const destination = this.getCaptureDestination();
       const legacyClient = new Supermemory({
         apiKey: SUPERMEMORY_API_KEY,
-        baseURL: getApiBaseUrl(),
+        baseURL: destination.baseUrl,
         defaultHeaders: { "x-sm-source": OPENCODE_SOURCE },
       });
       this.client =
-        getApiVersion() === "v5"
+        destination.apiVersion === "v5"
           ? new V5Client(
               SUPERMEMORY_API_KEY!,
-              getApiBaseUrl(),
+              destination.baseUrl,
               legacyClient.settings,
               TIMEOUT_MS - TIMEOUT_BACKSTOP_GRACE_MS,
             )
@@ -644,6 +629,8 @@ export class SupermemoryClient {
       entityContextByContainerTag?: Record<string, string>;
       customId?: string;
       timeoutMs?: number;
+      requireComplete?: boolean;
+      preserveWhitespace?: boolean;
     },
   ) {
     log("ingestConversation: start", {
@@ -666,8 +653,10 @@ export class SupermemoryClient {
       };
     }
 
-    const transcript = this.formatConversationTranscript(messages);
-    const rawContent = `[Conversation ${conversationId}]\n${transcript}`;
+    const rawContent = formatConversationContent(conversationId, messages, options?.preserveWhitespace);
+    if (options?.requireComplete && rawContent.length > MAX_CONVERSATION_CHARS) {
+      return { success: false as const, error: "Conversation exceeds the complete-submission budget" };
+    }
     const content =
       rawContent.length > MAX_CONVERSATION_CHARS
         ? `${rawContent.slice(0, MAX_CONVERSATION_CHARS)}\n...[truncated]`
@@ -675,7 +664,7 @@ export class SupermemoryClient {
     let submittedMessageCount = 0;
     let submittedLength = `[Conversation ${conversationId}]\n`.length;
     for (const [index, message] of messages.entries()) {
-      submittedLength += `${index + 1}. ${this.formatConversationMessage(message)}`.length;
+      submittedLength += `${index + 1}. ${formatConversationMessage(message, options?.preserveWhitespace)}`.length;
       if (submittedLength > MAX_CONVERSATION_CHARS) break;
       submittedMessageCount += 1;
       submittedLength += 1;
