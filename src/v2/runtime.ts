@@ -1255,45 +1255,56 @@ export class V2Runtime {
   }
 }
 
-const OWNER_KEY = Symbol.for("opencode-supermemory.v2.owner");
+const OWNER_REGISTRY_KEY = Symbol.for("opencode-supermemory.v2.owners");
 
 interface GlobalOwner {
   generation: number;
   cleanup: () => void;
 }
 
-function ownerRegistry(): Record<symbol, GlobalOwner | undefined> {
-  return globalThis as unknown as Record<symbol, GlobalOwner | undefined>;
+function ownerRegistry(): Map<string, GlobalOwner> {
+  const global = globalThis as unknown as Record<
+    symbol,
+    Map<string, GlobalOwner> | undefined
+  >;
+  let registry = global[OWNER_REGISTRY_KEY];
+  if (!registry) {
+    registry = new Map();
+    global[OWNER_REGISTRY_KEY] = registry;
+  }
+  return registry;
 }
 
 /**
- * Starts the OpenCode 2 runtime. Only one instance is active per process, so a
- * hot-reloaded plugin replaces (and cleans up) the previous generation.
+ * Starts the OpenCode 2 runtime. Each location directory owns one active
+ * generation, so a hot-reloaded plugin replaces (and cleans up) the previous
+ * generation in that directory without affecting other locations.
  */
 export async function setupV2(
   ctx: V2Context,
   options?: Partial<V2RuntimeDependencies>,
 ): Promise<() => void> {
   const registry = ownerRegistry();
-  const previous = registry[OWNER_KEY];
+  const directory = ctx.location.directory;
+  const previous = registry.get(directory);
   previous?.cleanup();
 
   const owner: GlobalOwner = {
     generation: (previous?.generation ?? 0) + 1,
     cleanup: () => undefined,
   };
-  registry[OWNER_KEY] = owner;
+  registry.set(directory, owner);
 
-  const runtime = new V2Runtime(ctx, options, () => registry[OWNER_KEY] === owner);
+  const runtime = new V2Runtime(ctx, options, () => registry.get(directory) === owner);
   const cleanup = () => {
     runtime.cleanup();
-    if (registry[OWNER_KEY] === owner) delete registry[OWNER_KEY];
+    if (registry.get(directory) === owner) registry.delete(directory);
   };
   owner.cleanup = cleanup;
 
   log("v2 plugin init", {
     generation: owner.generation,
-    directory: ctx.location?.directory,
+    directory,
     configured: runtime["active"] && (options?.configured ?? isConfigured()),
   });
 
