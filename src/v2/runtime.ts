@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
+import { resolve } from "node:path";
 
 import type { Plugin } from "@opencode/plugin";
 import type { SessionHooks } from "@opencode/plugin/promise/session";
 
-import { CONFIG, isConfigured, PLUGIN_VERSION } from "../config.js";
+import { CONFIG, getApiBaseUrl, getApiVersion, isConfigured, PLUGIN_VERSION } from "../config.js";
 import {
   createMemoryActivityReporterFromSink,
   type MemoryActivityNotice,
@@ -145,11 +146,11 @@ const DEFAULT_DEPENDENCIES: V2RuntimeDependencies = {
     checkNpmUpdate("opencode-supermemory", PLUGIN_VERSION, UPDATE_COMMAND),
 };
 
-/** Minimal shape of an OpenCode 2 event as read from `ctx.event.subscribe()`. */
 export interface V2Event {
   id?: string;
   type: string;
   data?: Record<string, unknown>;
+  location?: { directory?: string };
 }
 
 /** Minimal shape of a persisted OpenCode 2 transcript message. */
@@ -175,13 +176,31 @@ interface SessionState {
   dispatchOrder: string[];
   turns: CaptureTurn[];
   turnIndex: Map<string, number>;
-  completedCaptureIds: Set<string>;
+  acknowledgedCaptureIds: Set<string>;
+  acknowledgedTurnFingerprints: Set<string>;
+  captureLedgerLoaded?: Promise<void>;
+  captureLedgerKey?: string;
+  captureLedgerDirty: boolean;
 }
 
 interface PendingSummary {
   customId: string;
   sessionID: string;
   text: string;
+}
+
+interface CaptureHandoff {
+  sessions: Array<{
+    sessionID: string;
+    directory?: string;
+    tags?: ResolvedTags;
+    turns: CaptureTurn[];
+    captureIds: string[];
+    turnFingerprints: string[];
+    ledgerKey?: string;
+    dirty: boolean;
+  }>;
+  summaries: PendingSummary[];
 }
 
 interface Registration {
@@ -200,6 +219,11 @@ function mergeDependencies(
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function normalizeDirectory(directory: string): string {
+  const normalized = resolve(directory);
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
 function removeCodeBlocks(text: string): string {
@@ -441,12 +465,17 @@ export class V2Runtime {
   readonly #captureInFlight = new Map<string, Promise<void>>();
   readonly #pendingSummaries = new Map<string, PendingSummary>();
   readonly #summaryInFlight = new Set<string>();
+  readonly #summaryTasks = new Map<string, Promise<void>>();
   readonly #deduper = new EventDeduper();
+  readonly #sessionOwners = new Map<string, boolean>();
+  readonly #ownerLookups = new Map<string, Promise<boolean>>();
   readonly #registrations: Registration[] = [];
+  readonly #registrationTasks = new Set<Promise<void>>();
   readonly #abortController = new AbortController();
   #emitActivity: ((notice: MemoryActivityNotice) => void) | undefined;
   #activity: MemoryActivityReporter;
   #active = true;
+  #cleanup: Promise<void> | undefined;
 
   constructor(
     ctx: V2Context,
@@ -471,6 +500,7 @@ export class V2Runtime {
   }
 
   async register(): Promise<void> {
+    if (!this.active) return;
     const { logger } = this.#deps;
 
     await this.#track(
@@ -558,8 +588,10 @@ export class V2Runtime {
     if (!this.active) return;
 
     try {
-      const rpc = await this.#ctx.rpc.register(SUPERMEMORY_RPC, {});
-      this.#registrations.push(rpc);
+      const pending = this.#ctx.rpc.register(SUPERMEMORY_RPC, {});
+      await this.#track(pending);
+      const rpc = await pending;
+      if (!this.active) return;
       this.#emitActivity = (notice) => {
         void rpc.events
           .emit("activity", {
@@ -682,7 +714,8 @@ export class V2Runtime {
       }
     }
 
-    applyInjection(event.messages, latestUser, await pending);
+    const injection = await pending;
+    if (this.active) applyInjection(event.messages, latestUser, injection);
   }
 
   async handleCompaction(event: {
@@ -701,6 +734,11 @@ export class V2Runtime {
   async handleEvent(event: V2Event): Promise<void> {
     if (!this.active || this.#deduper.hasSeen(event.id)) return;
     const sessionID = this.#eventSessionID(event);
+
+    if (!sessionID && event.location?.directory &&
+        normalizeDirectory(event.location.directory) !== normalizeDirectory(this.#ctx.location.directory)) return;
+    if (sessionID && !(await this.#ownsSession(sessionID, event))) return;
+    if (!this.active) return;
 
     if (sessionID && event.type !== "session.compaction.ended") {
       void this.#retryPendingSummaries(sessionID);
@@ -729,10 +767,14 @@ export class V2Runtime {
         const state = this.#states.get(sessionID);
         this.#recall.delete(sessionID);
         if (!state) return;
-        await this.#runCaptureExclusive(sessionID, () =>
-          this.#captureSessionEnd(sessionID),
-        );
-        this.#states.delete(sessionID);
+        await this.#runCaptureExclusive(sessionID, async () => {
+          if (!(await this.#captureSessionEnd(sessionID))) return;
+          if (state.captureLedgerKey) {
+            await this.#ctx.storage.remove(state.captureLedgerKey);
+          }
+          this.#states.delete(sessionID);
+          this.#sessionOwners.delete(sessionID);
+        });
         return;
       }
 
@@ -755,8 +797,11 @@ export class V2Runtime {
       }
 
       case "global.disposed": {
-        await this.#flushAll();
-        this.#states.clear();
+        await this.idle();
+        const unfinished = await this.#flushAll();
+        for (const sessionID of this.#states.keys()) {
+          if (!unfinished.has(sessionID)) this.#states.delete(sessionID);
+        }
         this.#recall.clear();
         return;
       }
@@ -765,37 +810,115 @@ export class V2Runtime {
 
   /** Waits for background capture and summary work; used by tests and shutdown. */
   async idle(): Promise<void> {
-    while (this.#captureInFlight.size > 0 || this.#summaryInFlight.size > 0) {
-      await Promise.allSettled([...this.#captureInFlight.values()]);
-      if (this.#summaryInFlight.size > 0) {
-        await new Promise((resolve) => setTimeout(resolve, 5));
-      }
+    while (this.#captureInFlight.size > 0 || this.#summaryTasks.size > 0) {
+      await Promise.allSettled([...this.#captureInFlight.values(), ...this.#summaryTasks.values()]);
     }
   }
 
-  cleanup(): void {
-    if (!this.#active) return;
+  cleanup(): Promise<void> {
+    if (this.#cleanup) return this.#cleanup;
     this.#active = false;
     this.#abortController.abort();
-
-    void this.#flushAll(true).catch((error) => {
+    const registrations = this.#registrations.splice(0);
+    this.#cleanup = (async () => {
+      await Promise.allSettled(this.#registrationTasks);
+      const disposals = await Promise.allSettled(registrations.map((registration) => registration.dispose()));
+      for (const result of disposals) {
+        if (result.status === "rejected") {
+          this.#deps.logger("v2 registration cleanup failed", { error: String(result.reason) });
+        }
+      }
+      await this.idle();
+      const unfinished = await this.#flushAll(true);
+      for (const sessionID of this.#states.keys()) {
+        if (!unfinished.has(sessionID)) this.#states.delete(sessionID);
+      }
+      this.#recall.clear();
+    })().catch((error) => {
       this.#deps.logger("v2 cleanup capture failed", { error: String(error) });
     });
-    this.#states.clear();
-    this.#recall.clear();
-
-    for (const registration of this.#registrations.splice(0)) {
-      this.#disposeRegistration(registration);
-    }
+    return this.#cleanup;
   }
 
   async #track(pending: Promise<Registration>): Promise<void> {
-    const registration = await pending;
-    if (!this.active) {
-      this.#disposeRegistration(registration);
-      return;
+    const task = (async () => {
+      const registration = await pending;
+      if (!this.active) {
+        await registration.dispose();
+        return;
+      }
+      this.#registrations.push(registration);
+    })();
+    this.#registrationTasks.add(task);
+    try { await task; } finally { this.#registrationTasks.delete(task); }
+  }
+
+  takeCaptureState(): CaptureHandoff {
+    const snapshot: CaptureHandoff = {
+      sessions: [...this.#states].map(([sessionID, state]) => ({
+        sessionID,
+        directory: state.directory,
+        tags: state.tags,
+        turns: state.turns,
+        captureIds: [...state.acknowledgedCaptureIds],
+        turnFingerprints: [...state.acknowledgedTurnFingerprints],
+        ledgerKey: state.captureLedgerKey,
+        dirty: state.captureLedgerDirty,
+      })),
+      summaries: [...this.#pendingSummaries.values()],
+    };
+    this.#states.clear();
+    this.#pendingSummaries.clear();
+    return snapshot;
+  }
+
+  inheritCaptureState(snapshot: CaptureHandoff): void {
+    for (const source of snapshot.sessions) {
+      const state = this.#state(source.sessionID);
+      state.directory = source.directory;
+      state.tags = source.tags;
+      state.turns = source.turns;
+      state.turnIndex = new Map(source.turns.map((turn, index) => [turn.id, index]));
+      state.acknowledgedCaptureIds = new Set(source.captureIds);
+      state.acknowledgedTurnFingerprints = new Set(source.turnFingerprints);
+      state.captureLedgerKey = source.ledgerKey;
+      state.captureLedgerDirty = source.dirty;
     }
-    this.#registrations.push(registration);
+    for (const summary of snapshot.summaries) this.#pendingSummaries.set(summary.customId, summary);
+  }
+
+  async #ownsSession(sessionID: string, event: V2Event): Promise<boolean> {
+    const directory = event.location?.directory;
+    if (directory) {
+      const owned = normalizeDirectory(directory) === normalizeDirectory(this.#ctx.location.directory);
+      this.#sessionOwners.set(sessionID, owned);
+      return owned;
+    }
+    const known = this.#sessionOwners.get(sessionID);
+    if (known !== undefined) return known;
+    const pending = this.#ownerLookups.get(sessionID);
+    if (pending) return pending;
+    const lookup = (async () => {
+      try {
+        const session = await this.#ctx.session.get({ sessionID });
+        const owned = normalizeDirectory(session.location.directory) ===
+          normalizeDirectory(this.#ctx.location.directory);
+        this.#sessionOwners.set(sessionID, owned);
+        if (this.#sessionOwners.size > 1024) {
+          this.#sessionOwners.delete(this.#sessionOwners.keys().next().value!);
+        }
+        return owned;
+      } catch (error) {
+        this.#deps.logger("v2 session owner lookup failed; skipping event", {
+          sessionID, error: String(error),
+        });
+        return false;
+      } finally {
+        this.#ownerLookups.delete(sessionID);
+      }
+    })();
+    this.#ownerLookups.set(sessionID, lookup);
+    return lookup;
   }
 
   #state(sessionID: string): SessionState {
@@ -807,7 +930,9 @@ export class V2Runtime {
       dispatchOrder: [],
       turns: [],
       turnIndex: new Map(),
-      completedCaptureIds: new Set(),
+      acknowledgedCaptureIds: new Set(),
+      acknowledgedTurnFingerprints: new Set(),
+      captureLedgerDirty: false,
     };
     this.#states.set(sessionID, state);
     return state;
@@ -818,20 +943,6 @@ export class V2Runtime {
       success: false,
       error: "This Supermemory plugin instance has been replaced; retry the call.",
     });
-  }
-
-  #disposeRegistration(registration: Registration): void {
-    try {
-      void registration.dispose().catch((error) => {
-        this.#deps.logger("v2 registration cleanup failed", {
-          error: String(error),
-        });
-      });
-    } catch (error) {
-      this.#deps.logger("v2 registration cleanup failed", {
-        error: String(error),
-      });
-    }
   }
 
   #dispatchKey(
@@ -866,6 +977,10 @@ export class V2Runtime {
       if (!directory) {
         throw new Error(`Unable to resolve directory for OpenCode session ${sessionID}`);
       }
+      if (normalizeDirectory(directory) !== normalizeDirectory(this.#ctx.location.directory)) {
+        throw new Error(`OpenCode session ${sessionID} belongs to another location`);
+      }
+      this.#sessionOwners.set(sessionID, true);
       state.directory = directory;
       state.tags = this.#deps.resolveTags(directory);
       return state.tags;
@@ -1006,6 +1121,10 @@ export class V2Runtime {
 
   async #refreshTurns(sessionID: string, state: SessionState): Promise<CaptureTurn[]> {
     try {
+      const session = await this.#ctx.session.get({ sessionID });
+      if (normalizeDirectory(session.location.directory) !== normalizeDirectory(this.#ctx.location.directory)) {
+        return state.turns;
+      }
       const messages = (await this.#ctx.session.context({ sessionID })) as unknown;
       if (Array.isArray(messages)) {
         mergeTurns(
@@ -1029,15 +1148,20 @@ export class V2Runtime {
     batch: CaptureBatch,
     reason: "cadence" | "session_end",
   ): Promise<boolean> {
+    const remaining = batch.turns.filter((turn) =>
+      turn.messages.length > 0 && !state.acknowledgedTurnFingerprints.has(sha256(JSON.stringify(turn))));
+    if (remaining.length === 0) return true;
+    batch = {
+      startTurn: batch.startTurn + batch.turns.indexOf(remaining[0]!),
+      endTurn: batch.startTurn + batch.turns.indexOf(remaining.at(-1)!),
+      turns: remaining,
+    };
     const captureId = getCaptureId(sessionID, batch);
-    if (state.completedCaptureIds.has(captureId)) return true;
     const messages = batch.turns.flatMap((turn) => turn.messages);
-    if (messages.length === 0) {
-      state.completedCaptureIds.add(captureId);
-      return true;
-    }
+    const acknowledgedId = `${captureId}:${sha256(JSON.stringify(messages))}`;
+    if (state.acknowledgedCaptureIds.has(acknowledgedId)) return true;
 
-    let result: { success: boolean; error?: string };
+    let result: { success: boolean; error?: string; submittedMessageCount?: number };
     try {
       const tags = await this.#resolveSession(sessionID);
       result = await this.#deps.memoryClient.ingestConversation(
@@ -1068,7 +1192,17 @@ export class V2Runtime {
     }
 
     if (result.success) {
-      state.completedCaptureIds.add(captureId);
+      const submittedMessageCount = result.submittedMessageCount ?? messages.length;
+      state.acknowledgedCaptureIds.add(acknowledgedId);
+      let messageCount = 0;
+      for (const turn of batch.turns) {
+        messageCount += turn.messages.length;
+        if (messageCount <= submittedMessageCount) {
+          state.acknowledgedTurnFingerprints.add(sha256(JSON.stringify(turn)));
+        }
+      }
+      state.captureLedgerDirty = true;
+      await this.#persistCaptureLedger(sessionID, state);
       this.#activity.saved();
       this.#deps.logger("[capture] conversation batch saved", {
         sessionID,
@@ -1089,8 +1223,60 @@ export class V2Runtime {
     return false;
   }
 
+  async #loadCaptureLedger(sessionID: string, state: SessionState): Promise<void> {
+    if (!this.#ctx.storage) return;
+    state.captureLedgerLoaded ??= (async () => {
+      const tags = await this.#resolveSession(sessionID);
+      const scope = sha256(JSON.stringify([
+        getApiBaseUrl(), getApiVersion(), normalizeDirectory(state.directory!),
+        tags.canonical, sessionID,
+      ]));
+      state.captureLedgerKey = `capture-acks:v1:${scope}`;
+      const saved = await this.#ctx.storage.get(state.captureLedgerKey) as Record<string, unknown> | undefined;
+      if (saved === undefined) return;
+      if (!saved || Array.isArray(saved) || typeof saved !== "object" ||
+          saved.version !== 1 || saved.scope !== scope ||
+          !Array.isArray(saved.captureIds) || !Array.isArray(saved.turnIds) ||
+          !saved.captureIds.every((id) => typeof id === "string" && /^opencode:(capture|compaction):[a-f0-9]{64}:[a-f0-9]{64}$/.test(id)) ||
+          !saved.turnIds.every((id) => typeof id === "string" && /^[a-f0-9]{64}$/.test(id))) {
+        throw new Error(`Invalid capture acknowledgement ledger for ${sessionID}`);
+      }
+      for (const id of saved.captureIds) state.acknowledgedCaptureIds.add(id as string);
+      for (const id of saved.turnIds) state.acknowledgedTurnFingerprints.add(id as string);
+    })();
+    try {
+      await state.captureLedgerLoaded;
+    } catch (error) {
+      state.captureLedgerLoaded = undefined;
+      throw error;
+    }
+  }
+
+  async #persistCaptureLedger(sessionID: string, state: SessionState): Promise<void> {
+    if (!this.#ctx.storage) {
+      state.captureLedgerDirty = false;
+      return;
+    }
+    if (!state.captureLedgerDirty || !state.captureLedgerKey) return;
+    try {
+      await this.#ctx.storage.set(state.captureLedgerKey, {
+        version: 1,
+        scope: state.captureLedgerKey.slice("capture-acks:v1:".length),
+        captureIds: [...state.acknowledgedCaptureIds],
+        turnIds: [...state.acknowledgedTurnFingerprints],
+      });
+      state.captureLedgerDirty = false;
+    } catch (error) {
+      this.#deps.logger("[capture] acknowledgement persistence failed; retaining in-memory ACKs", {
+        sessionID, error: String(error),
+      });
+    }
+  }
+
   async #captureCadence(sessionID: string): Promise<void> {
     const state = this.#state(sessionID);
+    await this.#loadCaptureLedger(sessionID, state);
+    await this.#persistCaptureLedger(sessionID, state);
     const turns = await this.#refreshTurns(sessionID, state);
     for (const batch of buildCadenceBatches(
       turns,
@@ -1100,47 +1286,59 @@ export class V2Runtime {
     }
   }
 
-  async #captureSessionEnd(sessionID: string): Promise<void> {
+  async #captureSessionEnd(sessionID: string): Promise<boolean> {
     const state = this.#state(sessionID);
+    await this.#loadCaptureLedger(sessionID, state);
+    await this.#persistCaptureLedger(sessionID, state);
     const turns = await this.#refreshTurns(sessionID, state);
+    let complete = true;
     for (const batch of buildCadenceBatches(
       turns,
       this.#deps.config.captureEveryNTurns,
     )) {
-      await this.#saveBatch(sessionID, state, batch, "cadence");
+      if (!(await this.#saveBatch(sessionID, state, batch, "cadence"))) complete = false;
     }
     const finalBatch = buildSessionEndBatch(
       turns,
       this.#deps.config.captureEveryNTurns,
     );
     if (finalBatch) {
-      await this.#saveBatch(sessionID, state, finalBatch, "session_end");
+      if (!(await this.#saveBatch(sessionID, state, finalBatch, "session_end"))) complete = false;
     }
+    return complete && !state.captureLedgerDirty;
   }
 
-  async #flushAll(allowInactive = false): Promise<void> {
+  async #flushAll(allowInactive = false): Promise<Set<string>> {
     const sessions = [...this.#states.keys()];
+    const unfinished = new Set(sessions);
     const pending = new Set(
       [...this.#pendingSummaries.values()].map((item) => item.sessionID),
     );
     await Promise.all([
       ...sessions.map((sessionID) =>
         this.#runCaptureExclusive(sessionID, () =>
-          this.#captureSessionEnd(sessionID),
+          this.#captureSessionEnd(sessionID).then((complete) => {
+            if (complete) unfinished.delete(sessionID);
+          }),
         ),
       ),
       ...[...pending].map((sessionID) =>
         this.#retryPendingSummaries(sessionID, allowInactive),
       ),
     ]);
+    for (const [sessionID, state] of this.#states) {
+      if (state.captureLedgerDirty) unfinished.add(sessionID);
+    }
+    for (const item of this.#pendingSummaries.values()) unfinished.add(item.sessionID);
+    return unfinished;
   }
 
   async #runCaptureExclusive(
     sessionID: string,
-    task: () => Promise<void>,
+    task: () => Promise<unknown>,
   ): Promise<void> {
     const previous = this.#captureInFlight.get(sessionID) ?? Promise.resolve();
-    const next = previous.catch(() => undefined).then(task);
+    const next = previous.catch(() => undefined).then(async () => { await task(); });
     this.#captureInFlight.set(sessionID, next);
     try {
       await next;
@@ -1156,7 +1354,18 @@ export class V2Runtime {
     }
   }
 
-  async #retryPendingSummaries(
+  #retryPendingSummaries(sessionID: string, allowInactive = false): Promise<void> {
+    const previous = this.#summaryTasks.get(sessionID);
+    if (previous) return previous;
+    const task = this.#savePendingSummaries(sessionID, allowInactive);
+    this.#summaryTasks.set(sessionID, task);
+    void task.finally(() => {
+      if (this.#summaryTasks.get(sessionID) === task) this.#summaryTasks.delete(sessionID);
+    }).catch(() => undefined);
+    return task;
+  }
+
+  async #savePendingSummaries(
     sessionID: string,
     allowInactive = false,
   ): Promise<void> {
@@ -1167,8 +1376,10 @@ export class V2Runtime {
     if (pending.length === 0) return;
 
     let tags: ResolvedTags;
+    const state = this.#state(sessionID);
     try {
       tags = await this.#resolveSession(sessionID);
+      await this.#loadCaptureLedger(sessionID, state);
     } catch (error) {
       this.#deps.logger("v2 compaction summary retry deferred", {
         sessionID,
@@ -1178,6 +1389,11 @@ export class V2Runtime {
     }
 
     for (const summary of pending) {
+      const acknowledgedId = `${summary.customId}:${sha256(summary.text)}`;
+      if (state.acknowledgedCaptureIds.has(acknowledgedId)) {
+        this.#pendingSummaries.delete(summary.customId);
+        continue;
+      }
       if (this.#summaryInFlight.has(summary.customId)) continue;
       this.#summaryInFlight.add(summary.customId);
       try {
@@ -1199,6 +1415,11 @@ export class V2Runtime {
           },
         );
         if (result.success) {
+          await this.#runCaptureExclusive(sessionID, async () => {
+            state.acknowledgedCaptureIds.add(acknowledgedId);
+            state.captureLedgerDirty = true;
+            await this.#persistCaptureLedger(sessionID, state);
+          });
           this.#pendingSummaries.delete(summary.customId);
           this.#activity.saved();
           this.#deps.logger("[compaction] summary saved as memory", {
@@ -1255,41 +1476,45 @@ export class V2Runtime {
   }
 }
 
-const OWNER_KEY = Symbol.for("opencode-supermemory.v2.owner");
+const OWNER_REGISTRY_KEY = Symbol.for("opencode-supermemory.v2.owners");
 
 interface GlobalOwner {
   generation: number;
-  cleanup: () => void;
+  cleanup: () => Promise<void>;
+  runtime?: V2Runtime;
 }
 
-function ownerRegistry(): Record<symbol, GlobalOwner | undefined> {
-  return globalThis as unknown as Record<symbol, GlobalOwner | undefined>;
+function ownerRegistry(): Map<string, GlobalOwner> {
+  const global = globalThis as unknown as Record<symbol, Map<string, GlobalOwner> | undefined>;
+  return global[OWNER_REGISTRY_KEY] ??= new Map();
 }
 
-/**
- * Starts the OpenCode 2 runtime. Only one instance is active per process, so a
- * hot-reloaded plugin replaces (and cleans up) the previous generation.
- */
+// Replacements finish disposal and capture before the same location can register again.
 export async function setupV2(
   ctx: V2Context,
   options?: Partial<V2RuntimeDependencies>,
-): Promise<() => void> {
+): Promise<() => Promise<void>> {
   const registry = ownerRegistry();
-  const previous = registry[OWNER_KEY];
-  previous?.cleanup();
+  const directory = normalizeDirectory(ctx.location.directory);
+  const previous = registry.get(directory);
 
   const owner: GlobalOwner = {
     generation: (previous?.generation ?? 0) + 1,
-    cleanup: () => undefined,
+    cleanup: async () => undefined,
   };
-  registry[OWNER_KEY] = owner;
+  registry.set(directory, owner);
 
-  const runtime = new V2Runtime(ctx, options, () => registry[OWNER_KEY] === owner);
-  const cleanup = () => {
-    runtime.cleanup();
-    if (registry[OWNER_KEY] === owner) delete registry[OWNER_KEY];
+  const runtime = new V2Runtime(ctx, options, () => registry.get(directory) === owner);
+  owner.runtime = runtime;
+  const predecessor = previous?.cleanup() ?? Promise.resolve();
+  const cleanup = async () => {
+    await predecessor;
+    await runtime.cleanup();
+    if (registry.get(directory) === owner && runtime.trackedSessionCount === 0) registry.delete(directory);
   };
   owner.cleanup = cleanup;
+  await predecessor;
+  if (previous?.runtime) runtime.inheritCaptureState(previous.runtime.takeCaptureState());
 
   log("v2 plugin init", {
     generation: owner.generation,
@@ -1300,7 +1525,7 @@ export async function setupV2(
   try {
     await runtime.register();
   } catch (error) {
-    cleanup();
+    await cleanup();
     throw error;
   }
 

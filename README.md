@@ -169,6 +169,10 @@ Completed conversations are captured automatically:
 - Synthetic plugin context is excluded and `<private>` content is redacted.
 - Stable capture IDs retain batch identity across repeated lifecycle events; they do not guarantee exactly-once processing or billing after an ambiguous response.
 
+On OpenCode 2, each directory keeps its own tools and hooks, and only handles events for its sessions. Accepted capture batches and fully submitted turn fingerprints are recorded in host plugin storage, scoped to the API destination, namespace, directory and session. Reloads and restarts suppress those confirmed uploads; a storage read error defers capture rather than treating history as unsaved. Failed writes remain retryable without a permanent attempt cap.
+
+Older versions kept acceptance only in memory, so the first resume after upgrading has no durable evidence of earlier uploads and may retry historical content. Original host transcripts and configuration are retained; no historical batch is invented as accepted. A timed-out request may also have reached the server: neither stable IDs nor a queued acceptance proves exactly-once processing. If an ACK cannot be persisted, it is retained across same-process replacement, but a process exit before storage recovers still leaves that uncertainty. The existing 100,000-character upload limit remains; truncated turns are not recorded as fully submitted.
+
 ### Keyword Detection
 
 Say "remember", "save this", "don't forget" etc. and the agent auto-saves to memory.
