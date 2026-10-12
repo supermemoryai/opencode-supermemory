@@ -169,6 +169,7 @@ interface Injection {
 
 interface SessionState {
   directory?: string;
+  deleted?: boolean;
   tags?: ResolvedTags;
   resolving?: Promise<ResolvedTags>;
   injectedInitialContext: boolean;
@@ -193,6 +194,7 @@ interface CaptureHandoff {
   sessions: Array<{
     sessionID: string;
     directory?: string;
+    deleted?: boolean;
     tags?: ResolvedTags;
     turns: CaptureTurn[];
     captureIds: string[];
@@ -740,9 +742,9 @@ export class V2Runtime {
     if (sessionID && !(await this.#ownsSession(sessionID, event))) return;
     if (!this.active) return;
 
-    if (sessionID && event.type !== "session.compaction.ended") {
-      void this.#retryPendingSummaries(sessionID);
-    }
+    const summaryWork = sessionID && event.type !== "session.compaction.ended"
+      ? this.#retryPendingSummaries(sessionID)
+      : undefined;
 
     switch (event.type) {
       case "session.execution.succeeded": {
@@ -764,17 +766,15 @@ export class V2Runtime {
 
       case "session.deleted": {
         if (!sessionID) return;
+        await summaryWork;
         const state = this.#states.get(sessionID);
         this.#recall.delete(sessionID);
         if (!state) return;
-        await this.#runCaptureExclusive(sessionID, async () => {
-          if (!(await this.#captureSessionEnd(sessionID))) return;
-          if (state.captureLedgerKey) {
-            await this.#ctx.storage.remove(state.captureLedgerKey);
-          }
+        state.deleted = true;
+        if (await this.#finishSession(sessionID)) {
           this.#states.delete(sessionID);
           this.#sessionOwners.delete(sessionID);
-        });
+        }
         return;
       }
 
@@ -858,6 +858,7 @@ export class V2Runtime {
       sessions: [...this.#states].map(([sessionID, state]) => ({
         sessionID,
         directory: state.directory,
+        deleted: state.deleted,
         tags: state.tags,
         turns: state.turns,
         captureIds: [...state.acknowledgedCaptureIds],
@@ -876,6 +877,7 @@ export class V2Runtime {
     for (const source of snapshot.sessions) {
       const state = this.#state(source.sessionID);
       state.directory = source.directory;
+      state.deleted = source.deleted;
       state.tags = source.tags;
       state.turns = source.turns;
       state.turnIndex = new Map(source.turns.map((turn, index) => [turn.id, index]));
@@ -891,8 +893,7 @@ export class V2Runtime {
     const directory = event.location?.directory;
     if (directory) {
       const owned = normalizeDirectory(directory) === normalizeDirectory(this.#ctx.location.directory);
-      this.#sessionOwners.set(sessionID, owned);
-      return owned;
+      return this.#rememberSessionOwner(sessionID, owned);
     }
     const known = this.#sessionOwners.get(sessionID);
     if (known !== undefined) return known;
@@ -903,11 +904,7 @@ export class V2Runtime {
         const session = await this.#ctx.session.get({ sessionID });
         const owned = normalizeDirectory(session.location.directory) ===
           normalizeDirectory(this.#ctx.location.directory);
-        this.#sessionOwners.set(sessionID, owned);
-        if (this.#sessionOwners.size > 1024) {
-          this.#sessionOwners.delete(this.#sessionOwners.keys().next().value!);
-        }
-        return owned;
+        return this.#rememberSessionOwner(sessionID, owned);
       } catch (error) {
         this.#deps.logger("v2 session owner lookup failed; skipping event", {
           sessionID, error: String(error),
@@ -919,6 +916,15 @@ export class V2Runtime {
     })();
     this.#ownerLookups.set(sessionID, lookup);
     return lookup;
+  }
+
+  #rememberSessionOwner(sessionID: string, owned: boolean): boolean {
+    this.#sessionOwners.delete(sessionID);
+    this.#sessionOwners.set(sessionID, owned);
+    while (this.#sessionOwners.size > 1024) {
+      this.#sessionOwners.delete(this.#sessionOwners.keys().next().value!);
+    }
+    return owned;
   }
 
   #state(sessionID: string): SessionState {
@@ -980,7 +986,7 @@ export class V2Runtime {
       if (normalizeDirectory(directory) !== normalizeDirectory(this.#ctx.location.directory)) {
         throw new Error(`OpenCode session ${sessionID} belongs to another location`);
       }
-      this.#sessionOwners.set(sessionID, true);
+      this.#rememberSessionOwner(sessionID, true);
       state.directory = directory;
       state.tags = this.#deps.resolveTags(directory);
       return state.tags;
@@ -1308,28 +1314,30 @@ export class V2Runtime {
     return complete && !state.captureLedgerDirty;
   }
 
+  async #finishSession(sessionID: string, allowInactive = false): Promise<boolean> {
+    await this.#retryPendingSummaries(sessionID, allowInactive);
+    let complete = false;
+    await this.#runCaptureExclusive(sessionID, async () => {
+      if (!(await this.#captureSessionEnd(sessionID))) return;
+      if ([...this.#pendingSummaries.values()].some((item) => item.sessionID === sessionID)) return;
+      const state = this.#state(sessionID);
+      if (state.deleted && state.captureLedgerKey && this.#ctx.storage) {
+        await this.#ctx.storage.remove(state.captureLedgerKey);
+      }
+      complete = true;
+    });
+    return complete;
+  }
+
   async #flushAll(allowInactive = false): Promise<Set<string>> {
-    const sessions = [...this.#states.keys()];
-    const unfinished = new Set(sessions);
-    const pending = new Set(
-      [...this.#pendingSummaries.values()].map((item) => item.sessionID),
-    );
-    await Promise.all([
-      ...sessions.map((sessionID) =>
-        this.#runCaptureExclusive(sessionID, () =>
-          this.#captureSessionEnd(sessionID).then((complete) => {
-            if (complete) unfinished.delete(sessionID);
-          }),
-        ),
-      ),
-      ...[...pending].map((sessionID) =>
-        this.#retryPendingSummaries(sessionID, allowInactive),
-      ),
+    const sessions = new Set([
+      ...this.#states.keys(),
+      ...[...this.#pendingSummaries.values()].map((item) => item.sessionID),
     ]);
-    for (const [sessionID, state] of this.#states) {
-      if (state.captureLedgerDirty) unfinished.add(sessionID);
-    }
-    for (const item of this.#pendingSummaries.values()) unfinished.add(item.sessionID);
+    const unfinished = new Set(sessions);
+    await Promise.all([...sessions].map(async (sessionID) => {
+      if (await this.#finishSession(sessionID, allowInactive)) unfinished.delete(sessionID);
+    }));
     return unfinished;
   }
 
