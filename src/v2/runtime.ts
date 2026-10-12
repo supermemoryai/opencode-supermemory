@@ -1255,7 +1255,9 @@ export class V2Runtime {
   }
 }
 
-const OWNER_KEY = Symbol.for("opencode-supermemory.v2.owner");
+function ownerKeyFor(directory: string | undefined): symbol {
+  return Symbol.for(`opencode-supermemory.v2.owner:${directory ?? "global"}`);
+}
 
 interface GlobalOwner {
   generation: number;
@@ -1267,14 +1269,18 @@ function ownerRegistry(): Record<symbol, GlobalOwner | undefined> {
 }
 
 /**
- * Starts the OpenCode 2 runtime. Only one instance is active per process, so a
- * hot-reloaded plugin replaces (and cleans up) the previous generation.
+ * Starts the OpenCode 2 runtime. The OpenCode server instantiates the plugin
+ * once per project directory in the same process, so ownership is scoped per
+ * directory: a hot-reloaded plugin replaces (and cleans up) the previous
+ * generation of the same directory only, while other directories keep their
+ * runtime active.
  */
 export async function setupV2(
   ctx: V2Context,
   options?: Partial<V2RuntimeDependencies>,
 ): Promise<() => void> {
   const registry = ownerRegistry();
+  const OWNER_KEY = ownerKeyFor(ctx.location?.directory);
   const previous = registry[OWNER_KEY];
   previous?.cleanup();
 
