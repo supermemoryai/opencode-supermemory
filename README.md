@@ -56,10 +56,7 @@ bunx opencode-supermemory@latest install --no-tui
 ```
 
 This registers the plugin in `~/.config/opencode/opencode.jsonc` for both OpenCode V1
-and OpenCode 2, and creates the `/supermemory-index` command. Add
-`--disable-context-recovery` if the user also has
-[Oh My OpenCode](#usage-with-oh-my-opencode) installed, to avoid its auto-compact hook
-fighting with this plugin's V1 compaction.
+and OpenCode 2, and creates the `/supermemory-index` command.
 
 - Register the plugin in `~/.config/opencode/opencode.jsonc` (`plugin` for V1, `plugins`
   for OpenCode 2, plus an `allow` rule for the read-only `supermemory_recall` tool)
@@ -127,7 +124,7 @@ Run `/supermemory-index` to have the agent explore and memorize the codebase. `/
 | --- | --- |
 | 🧠 **Context injection**<br>On a session's first message, the agent silently receives your profile, all project knowledge, and (if `autoRecallEveryPrompt` is on) a semantic search over personal memories. | 🔎 **Reasoned recall**<br>Every turn, the agent is shown a directive asking it to decide whether recalling memory would help before answering. It searches via the `supermemory` tool only when it decides to; the search itself is auto-approved. |
 | 💾 **Automatic capture**<br>Completed turns are saved every `captureEveryNTurns` turns, with any remainder flushed when the session ends or OpenCode shuts down. Synthetic plugin context is excluded and `<private>` content is redacted. | 🗣️ **Keyword detection**<br>Saying "remember", "save this", "don't forget", or a custom pattern nudges the agent to save to memory. |
-| 🧭 **Codebase indexing**<br>`/supermemory-init` has the agent explore and memorize the codebase's structure, patterns, and conventions. | 🗜️ **Compaction memory**<br>On OpenCode V1, triggers summarization at 80% context capacity. On OpenCode 2, enriches the native compaction request. Both inject project memories into the summary and save the summary itself as a memory. |
+| 🧭 **Codebase indexing**<br>`/supermemory-init` has the agent explore and memorize the codebase's structure, patterns, and conventions. | 🗜️ **Compaction memory**<br>When OpenCode compacts a long session, project memories are added to the summary and the summary itself is saved as a memory. OpenCode decides when to compact. |
 | 🔒 **Privacy**<br>Content wrapped in `<private>...</private>` is never stored. | 🔔 **Update notices**<br>Checks npm for a newer release on session start and surfaces a one-line notice. |
 
 ```
@@ -186,13 +183,13 @@ Run `/supermemory-index` to explore and memorize your codebase structure, patter
 
 ### Compaction Memory
 
-On OpenCode V1, when context hits 80% capacity (`compactionThreshold`) the plugin triggers
-OpenCode's summarization, injects project memories into the summary prompt, and saves the
-resulting summary as a memory.
+OpenCode owns compaction on both V1 and OpenCode 2: it decides when to compact, which model
+writes the summary, and how the session continues. The plugin adds bounded project memories
+to OpenCode's own compaction prompt, then saves each successful summary as a memory. It never
+starts a compaction or sends a continuation itself.
 
-On OpenCode 2, OpenCode owns the compaction trigger and model. The plugin hooks the native
-compaction request to add the same project memories, then saves each successful summary as
-a memory. Set `compactionEnabled: false` to opt out on OpenCode 2.
+Set `compactionEnabled: false` to turn this off. The older `compactionThreshold` setting is
+no longer used to trigger compaction; a value of `0` or `false` still turns it off.
 
 ### Activity Notices and Status Footer
 
@@ -244,8 +241,6 @@ What differs on OpenCode 2:
 - Recall runs through the read-only `supermemory_recall` tool (search only). The installer
   allows it without prompting; `add`, `forget`, and the rest stay behind the normal
   `supermemory` permission. An explicit `deny` for `supermemory_recall` is preserved.
-- Compaction is native: the plugin enriches OpenCode's compaction request and saves the
-  summary instead of triggering compaction itself (`compactionEnabled`).
 - Recalled context is attached to the outgoing model request for the current prompt rather
   than persisted into the transcript.
 
@@ -374,10 +369,7 @@ scope, not from a different or malformed response.
   // Extra keyword patterns for memory detection (regex)
   "keywordPatterns": ["log\\s+this", "write\\s+down"],
 
-  // OpenCode V1: context usage ratio that triggers compaction (0-1)
-  "compactionThreshold": 0.8,
-
-  // OpenCode 2: enrich native compaction with project memories and save summaries
+  // Add project memories to OpenCode's compaction summaries and save the summaries
   "compactionEnabled": true,
 
   // Save completed conversation batches every N turns (0 = session end only)
@@ -417,20 +409,6 @@ unified write container with `projectContainerTag`:
 This is useful to preserve a legacy personal memory container, sync memories between
 machines for the same project, organize memories with your own naming scheme, or
 integrate with existing Supermemory container tags from other tools.
-
-## Usage with Oh My OpenCode
-
-If you're using [Oh My OpenCode](https://github.com/code-yeongyu/oh-my-opencode),
-disable its built-in auto-compact hook to let supermemory handle context compaction
-(or pass `--disable-context-recovery` to `install`):
-
-```json
-{
-  "disabled_hooks": ["anthropic-context-window-limit-recovery"]
-}
-```
-
-Add that to `~/.config/opencode/oh-my-opencode.json`.
 
 <details>
 <summary>Development</summary>
