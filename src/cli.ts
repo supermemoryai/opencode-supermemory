@@ -209,7 +209,7 @@ bunx opencode-supermemory@latest login
 \`\`\`
 
 This will:
-1. Start a local server on port 19877
+1. Start a temporary local server to receive the login callback
 2. Open the browser to Supermemory's authentication page
 3. After the user logs in, save credentials to ~/.supermemory-opencode/credentials.json
 
