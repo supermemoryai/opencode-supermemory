@@ -9,7 +9,7 @@ on:
 
 jobs:
   publish:
-    runs-on: ubuntu-latest
+    runs-on: "peak-ubuntu-24.04-4"
     permissions:
       contents: read
       id-token: write
