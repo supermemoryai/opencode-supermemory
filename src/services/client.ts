@@ -3,8 +3,10 @@ import { V5Client } from "./v5-client.js";
 import {
   CONFIG,
   PLUGIN_VERSION,
-  SUPERMEMORY_API_KEY,
+  createAuthenticatedFetch,
   getApiBaseUrl,
+  getApiKey,
+  getAuthToken,
   getApiVersion,
   isConfigured,
 } from "../config.js";
@@ -128,6 +130,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 
 export class SupermemoryClient {
   private client: Supermemory | V5Client | null = null;
+  private clientKey: string | null = null;
 
   private formatConversationMessage(message: ConversationMessage): string {
     const content =
@@ -160,20 +163,31 @@ export class SupermemoryClient {
   }
 
   private getClient(): Supermemory | V5Client {
+    // OpenCode keeps this process alive across login/logout; rebuild when the
+    // effective endpoint changes. Bearers are resolved per request, never cached,
+    // so a cached client stops authenticating as soon as credentials are removed.
+    const baseUrl = getApiBaseUrl();
+    const apiVersion = getApiVersion();
+    const clientKey = `${apiVersion} ${baseUrl}`;
+    if (this.client && this.clientKey && this.clientKey !== clientKey) this.client = null;
+    if ((!this.client || this.clientKey) && !isConfigured()) {
+      throw new Error(
+        "Supermemory authentication required. Run `bunx opencode-supermemory@latest login`, or set SUPERMEMORY_API_KEY.",
+      );
+    }
     if (!this.client) {
-      if (!isConfigured()) {
-        throw new Error("SUPERMEMORY_API_KEY not set");
-      }
+      this.clientKey = clientKey;
       const legacyClient = new Supermemory({
-        apiKey: SUPERMEMORY_API_KEY,
-        baseURL: getApiBaseUrl(),
+        apiKey: getApiKey() || "oauth",
+        baseURL: baseUrl,
+        fetch: createAuthenticatedFetch(baseUrl),
         defaultHeaders: { "x-sm-source": OPENCODE_SOURCE },
       });
       this.client =
-        getApiVersion() === "v5"
+        apiVersion === "v5"
           ? new V5Client(
-              SUPERMEMORY_API_KEY!,
-              getApiBaseUrl(),
+              () => getAuthToken(undefined, baseUrl),
+              baseUrl,
               legacyClient.settings,
               TIMEOUT_MS - TIMEOUT_BACKSTOP_GRACE_MS,
             )

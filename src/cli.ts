@@ -3,8 +3,24 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import * as readline from "node:readline";
-import { startAuthFlow, clearCredentials, loadCredentials, CREDENTIALS_FILE } from "./services/auth.js";
-import { CONFIG, CONFIG_FILE, SUPERMEMORY_API_KEY, getApiBaseUrl, isConfigured, writeInstallDefaults } from "./config.js";
+import {
+  startAuthFlow,
+  clearCredentials,
+  loadCredentials,
+  loadCredentialData,
+  settleAuth,
+  CREDENTIALS_FILE,
+} from "./services/auth.js";
+import {
+  CONFIG,
+  CONFIG_FILE,
+  getApiBaseUrl,
+  getApiKey,
+  getAuthToken,
+  getOAuthConfig,
+  isConfigured,
+  writeInstallDefaults,
+} from "./config.js";
 import { SupermemoryClient } from "./services/client.js";
 import { getTags } from "./services/tags.js";
 import {
@@ -209,9 +225,11 @@ bunx opencode-supermemory@latest login
 \`\`\`
 
 This will:
-1. Start a local server on port 19877
-2. Open the browser to Supermemory's authentication page
-3. After the user logs in, save credentials to ~/.supermemory-opencode/credentials.json
+1. Start a local callback server on 127.0.0.1:19880
+2. Open the browser to Supermemory's OAuth consent page
+3. After the user approves, save OAuth credentials to ~/.supermemory-opencode/credentials.json
+
+OpenCode picks up the new credentials without a restart.
 
 Wait for the command to complete, then inform the user whether authentication succeeded or failed.
 
@@ -230,7 +248,7 @@ Run this command to log out and clear Supermemory credentials:
 bunx opencode-supermemory@latest logout
 \`\`\`
 
-This will remove the saved credentials from ~/.supermemory-opencode/credentials.json.
+This will revoke the saved OAuth refresh token and remove the saved credentials from ~/.supermemory-opencode/credentials.json.
 
 Inform the user whether logout succeeded and that they'll need to run /supermemory-login to re-authenticate.
 `;
@@ -509,22 +527,28 @@ async function install(options: InstallOptions): Promise<number> {
 }
 
 async function login(): Promise<number> {
-  const existing = loadCredentials();
-  if (existing) {
+  const existing = loadCredentialData();
+  if (existing?.type === "oauth" && !getApiKey() && isConfigured()) {
     console.log("Already authenticated. Use 'logout' first to re-authenticate.");
     return 0;
   }
+  if (existing && existing.type !== "oauth") {
+    console.log("Replacing the saved API key with OAuth sign-in.");
+  }
 
-  const result = await startAuthFlow();
-
-  if (result.success) {
-    console.log("\n✓ Successfully authenticated with Supermemory!");
-    console.log("Restart OpenCode to activate.\n");
-    return 0;
-  } else {
-    console.error(`\n✗ Authentication failed: ${result.error}`);
+  try {
+    await startAuthFlow(getOAuthConfig());
+  } catch (error) {
+    console.error(`\n✗ Authentication failed: ${error instanceof Error ? error.message : String(error)}`);
     return 1;
   }
+
+  console.log("\n✓ Successfully authenticated with Supermemory!");
+  if (process.env.SUPERMEMORY_API_KEY || getConfiguredApiKeyFromFile()) {
+    console.log("An API key from SUPERMEMORY_API_KEY or the config file still takes precedence. Remove it to use OAuth.");
+  }
+  console.log("Running OpenCode sessions pick this up automatically.\n");
+  return 0;
 }
 
 function maskKey(key: string | undefined): string {
@@ -550,6 +574,11 @@ function getKeySource(): string {
   return "not configured";
 }
 
+function getAuthType(): "oauth" | "api_key" | "none" {
+  if (getApiKey()) return "api_key";
+  return loadCredentialData()?.type === "oauth" ? "oauth" : "none";
+}
+
 function getDevTlsHint(apiUrl: string): string | null {
   if (!apiUrl.includes(".dev.supermemory.ai")) return null;
   if (process.env.NODE_EXTRA_CA_CERTS) return null;
@@ -557,11 +586,11 @@ function getDevTlsHint(apiUrl: string): string | null {
 }
 
 async function fetchJson(apiUrl: string, path: string): Promise<unknown | null> {
-  if (!SUPERMEMORY_API_KEY) return null;
   try {
+    const token = await getAuthToken(undefined, apiUrl);
     const response = await fetch(`${apiUrl}${path}`, {
       headers: {
-        Authorization: `Bearer ${SUPERMEMORY_API_KEY}`,
+        Authorization: `Bearer ${token}`,
         "x-sm-source": "opencode",
       },
     });
@@ -630,7 +659,14 @@ async function status(): Promise<number> {
   lines.push("supermemory status");
   lines.push("");
   lines.push(`Connected: ${isConfigured() ? "checking..." : "no"}`);
-  lines.push(`API key: ${maskKey(SUPERMEMORY_API_KEY)} (${getKeySource()})`);
+  const authType = getAuthType();
+  const saved = loadCredentialData();
+  lines.push(`Auth type: ${authType}`);
+  if (authType === "oauth" && saved?.type === "oauth") {
+    lines.push(`OAuth client: ${saved.clientId}`);
+  } else {
+    lines.push(`API key: ${maskKey(getApiKey())} (${getKeySource()})`);
+  }
   lines.push(`API URL: ${apiUrl}`);
   lines.push("Memory scope: unified project container with personal/project metadata");
   lines.push(`Recall mode: ${CONFIG.recallMode}`);
@@ -643,7 +679,11 @@ async function status(): Promise<number> {
 
   if (!isConfigured()) {
     lines.push("");
-    lines.push("Run /supermemory-login to connect, or set SUPERMEMORY_API_KEY.");
+    lines.push(
+      authType === "oauth"
+        ? "Saved sign-in is expired or for a different API URL. Run /supermemory-login to reconnect, or set SUPERMEMORY_API_KEY."
+        : "Run /supermemory-login to connect, or set SUPERMEMORY_API_KEY.",
+    );
     console.log(lines.join("\n"));
     return 0;
   }
@@ -669,7 +709,7 @@ async function status(): Promise<number> {
     if (accountInfo.orgName) lines.push(`Organization: ${accountInfo.orgName}`);
   } else {
     lines.push("");
-    lines.push("Account: authenticated API key (account details unavailable from API key)");
+    lines.push("Account: details unavailable for these credentials");
   }
 
   if (!profileResult.success) {
@@ -683,21 +723,29 @@ async function status(): Promise<number> {
   return 0;
 }
 
-function logout(): number {
-  if (clearCredentials()) {
+async function logout(): Promise<number> {
+  let cleared;
+  try {
+    cleared = await clearCredentials();
+  } catch (error) {
+    console.error(`✗ Logout failed: ${error instanceof Error ? error.message : String(error)}`);
+    console.error("Saved credentials were kept. Try again when the network is available.");
+    return 1;
+  }
+  if (cleared) {
     console.log("✓ Logged out. Credentials cleared.");
-    console.log("This only logs out this local OpenCode install. To revoke the account-level OpenCode integration key, disconnect it from the Supermemory integrations page.");
-    if (process.env.SUPERMEMORY_API_KEY) {
-      console.log("SUPERMEMORY_API_KEY is still set in this shell, so memory may remain active until you unset it or restart OpenCode.");
+    if (cleared.type === "oauth") {
+      console.log("The OAuth refresh token was revoked. Running OpenCode sessions stop using it automatically.");
+    } else {
+      console.log("This only logs out this local OpenCode install. To revoke the account-level OpenCode integration key, disconnect it from the Supermemory integrations page.");
     }
-    return 0;
   } else {
     console.log("No credentials found.");
-    if (process.env.SUPERMEMORY_API_KEY) {
-      console.log("SUPERMEMORY_API_KEY is still set in this shell.");
-    }
-    return 0;
   }
+  if (process.env.SUPERMEMORY_API_KEY) {
+    console.log("SUPERMEMORY_API_KEY is still set in this shell, so memory may remain active until you unset it or restart OpenCode.");
+  }
+  return 0;
 }
 
 function printHelp(): void {
@@ -709,7 +757,7 @@ Commands:
     --no-tui                     Non-interactive mode (for LLM agents)
     --disable-context-recovery   Disable Oh My OpenCode's context hook
   login      Authenticate with Supermemory (opens browser)
-  logout     Clear stored credentials
+  logout     Revoke and clear stored credentials
   status     Show Supermemory connection status
 
 Examples:
@@ -720,30 +768,33 @@ Examples:
 `);
 }
 
+// Let a token refresh that is still rotating credentials save them before exiting.
+function exit(code: number): void {
+  void settleAuth().finally(() => process.exit(code));
+}
+
 const args = process.argv.slice(2);
 
 if (args.length === 0 || args[0] === "help" || args[0] === "--help" || args[0] === "-h") {
   printHelp();
-  process.exit(0);
-}
-
-if (args[0] === "install") {
+  exit(0);
+} else if (args[0] === "install") {
   const noTui = args.includes("--no-tui");
   const disableAutoCompact = args.includes("--disable-context-recovery");
-  install({ tui: !noTui, disableAutoCompact }).then((code) => process.exit(code));
+  install({ tui: !noTui, disableAutoCompact }).then(exit);
 } else if (args[0] === "setup") {
   console.log("Note: 'setup' is deprecated. Use 'install' instead.\n");
   const noTui = args.includes("--no-tui");
   const disableAutoCompact = args.includes("--disable-context-recovery");
-  install({ tui: !noTui, disableAutoCompact }).then((code) => process.exit(code));
+  install({ tui: !noTui, disableAutoCompact }).then(exit);
 } else if (args[0] === "login") {
-  login().then((code) => process.exit(code));
+  login().then(exit);
 } else if (args[0] === "logout") {
-  process.exit(logout());
+  logout().then(exit);
 } else if (args[0] === "status") {
-  status().then((code) => process.exit(code));
+  status().then(exit);
 } else {
   console.error(`Unknown command: ${args[0]}`);
   printHelp();
-  process.exit(1);
+  exit(1);
 }
