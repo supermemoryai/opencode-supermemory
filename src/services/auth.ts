@@ -66,7 +66,7 @@ export interface AuthResult {
   error?: string;
 }
 
-export function startAuthFlow(timeoutMs = AUTH_TIMEOUT): Promise<AuthResult> {
+export function startAuthFlow(timeoutMs = AUTH_TIMEOUT, open = openUrl): Promise<AuthResult> {
   return new Promise((resolve) => {
     let resolved = false;
     const stateToken = randomBytes(16).toString("hex");
@@ -169,12 +169,9 @@ export function startAuthFlow(timeoutMs = AUTH_TIMEOUT): Promise<AuthResult> {
 
       console.log("Opening browser for authentication...");
       console.log(`If it doesn't open, visit: ${authUrl}`);
-      openUrl(authUrl).catch((error) => {
+      open(authUrl).catch((error) => {
         if (!resolved) {
-          resolved = true;
-          clearTimeout(timer);
-          server.close();
-          resolve({ success: false, error: `Failed to open browser: ${error.message}` });
+          console.log(`Could not open a browser (${error.message}). Open the URL above to continue.`);
         }
       });
     });
