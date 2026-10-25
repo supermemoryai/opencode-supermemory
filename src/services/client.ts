@@ -672,6 +672,14 @@ export class SupermemoryClient {
       rawContent.length > MAX_CONVERSATION_CHARS
         ? `${rawContent.slice(0, MAX_CONVERSATION_CHARS)}\n...[truncated]`
         : rawContent;
+    let submittedMessageCount = 0;
+    let submittedLength = `[Conversation ${conversationId}]\n`.length;
+    for (const [index, message] of messages.entries()) {
+      submittedLength += `${index + 1}. ${this.formatConversationMessage(message)}`.length;
+      if (submittedLength > MAX_CONVERSATION_CHARS) break;
+      submittedMessageCount += 1;
+      submittedLength += 1;
+    }
 
     const ingestMetadata = {
       type: "conversation" as const,
@@ -734,6 +742,7 @@ export class SupermemoryClient {
       success: true as const,
       ...response,
       storedMemoryIds: savedIds,
+      submittedMessageCount,
     };
   }
 }
