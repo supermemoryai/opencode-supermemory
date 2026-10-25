@@ -29,9 +29,13 @@ interface SupermemoryConfig {
   projectContainerTag?: string;
   filterPrompt?: string;
   keywordPatterns?: string[];
-  compactionThreshold?: number;
-  /** OpenCode 2 only: enrich native compaction with project memories and save summaries. */
+  /** Enrich OpenCode's native compaction with project memories and save summaries. */
   compactionEnabled?: boolean;
+  /**
+   * @deprecated OpenCode now decides when to compact. Only `0` or `false` is
+   * still read, as a way to turn compaction memory off; use compactionEnabled.
+   */
+  compactionThreshold?: number | false;
   autoRecallEveryPrompt?: boolean;
   captureEveryNTurns?: number;
   recallDirective?: string | null;
@@ -57,6 +61,8 @@ const DEFAULT_KEYWORD_PATTERNS = [
   "always\\s+remember",
 ];
 
+const DEFAULT_COMPACTION_THRESHOLD = 0.8;
+
 const DEFAULTS: Required<Omit<SupermemoryConfig, "apiKey" | "baseUrl" | "apiVersion" | "userContainerTag" | "projectContainerTag" | "recallDirective">> = {
   similarityThreshold: 0.55,
   maxMemories: 5,
@@ -66,7 +72,7 @@ const DEFAULTS: Required<Omit<SupermemoryConfig, "apiKey" | "baseUrl" | "apiVers
   containerTagPrefix: "opencode",
   filterPrompt: "You are a stateful coding agent. Remember all the information, including but not limited to user's coding preferences, tech stack, behaviours, workflows, and any other relevant details.",
   keywordPatterns: [],
-  compactionThreshold: 0.80,
+  compactionThreshold: DEFAULT_COMPACTION_THRESHOLD,
   compactionEnabled: true,
   autoRecallEveryPrompt: false,
   captureEveryNTurns: 0,
@@ -82,12 +88,24 @@ function isValidRegex(pattern: string): boolean {
   }
 }
 
-function validateCompactionThreshold(value: number | undefined): number {
-  if (value === undefined || typeof value !== 'number' || isNaN(value)) {
-    return DEFAULTS.compactionThreshold;
+export function validateCompactionThreshold(
+  value: number | false | undefined,
+): number {
+  if (value === false || value === 0) return 0;
+  if (value === undefined || typeof value !== "number" || Number.isNaN(value)) {
+    return DEFAULT_COMPACTION_THRESHOLD;
   }
-  if (value <= 0 || value > 1) return DEFAULTS.compactionThreshold;
+  if (value < 0 || value > 1) return DEFAULT_COMPACTION_THRESHOLD;
   return value;
+}
+
+/** `compactionEnabled` wins; otherwise a legacy threshold of 0 or false turns it off. */
+export function resolveCompactionEnabled(
+  enabled: unknown,
+  legacyThreshold: number | false | undefined,
+): boolean {
+  if (typeof enabled === "boolean") return enabled;
+  return validateCompactionThreshold(legacyThreshold) !== 0;
 }
 
 function validateCaptureEveryNTurns(
@@ -200,10 +218,10 @@ export const CONFIG = {
     ...(fileConfig.keywordPatterns ?? []).filter(isValidRegex),
   ],
   compactionThreshold: validateCompactionThreshold(fileConfig.compactionThreshold),
-  compactionEnabled:
-    typeof fileConfig.compactionEnabled === "boolean"
-      ? fileConfig.compactionEnabled
-      : DEFAULTS.compactionEnabled,
+  compactionEnabled: resolveCompactionEnabled(
+    fileConfig.compactionEnabled,
+    fileConfig.compactionThreshold,
+  ),
   autoRecallEveryPrompt:
     fileConfig.autoRecallEveryPrompt ??
     (configExisted ? true : DEFAULTS.autoRecallEveryPrompt),
