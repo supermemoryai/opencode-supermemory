@@ -86,7 +86,6 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
   log("Plugin init", { directory, tags, configured: isConfigured() });
 
   if (!isConfigured()) {
-    // Hooks stay registered and idle; a later login applies without a restart.
     log("Plugin not authenticated yet - memory hooks idle until login or SUPERMEMORY_API_KEY");
   }
 
@@ -117,8 +116,7 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
     return modelLimits.get(`${providerID}/${modelID}`);
   };
 
-  // Created regardless of auth state; each event checks isConfigured() so a
-  // login or logout after startup takes effect without restarting OpenCode.
+  // Created regardless of auth state; each event checks isConfigured() instead.
   const compactionHook = ctx.client
     ? createCompactionHook(ctx as CompactionContext, tags, {
         threshold: CONFIG.compactionThreshold,

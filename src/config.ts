@@ -144,11 +144,7 @@ function loadRawConfig(): { config: SupermemoryConfig; existed: boolean } {
 
 const { config: fileConfig, existed: configExisted } = loadRawConfig();
 
-/**
- * Static API key, resolved on every call: `SUPERMEMORY_API_KEY`, then the config
- * file, then a legacy saved `{ apiKey }` credentials file. These take precedence
- * over OAuth. Never returns an OAuth token.
- */
+// API keys take precedence over OAuth. Never returns an OAuth token.
 export function getApiKey(): string | undefined {
   if (process.env.SUPERMEMORY_API_KEY) return process.env.SUPERMEMORY_API_KEY;
   if (fileConfig.apiKey) return fileConfig.apiKey;
@@ -189,11 +185,8 @@ function savedOAuthFor(apiBaseUrl: string) {
   return saved?.type === "oauth" && saved.apiBaseUrl === apiBaseUrl ? saved : undefined;
 }
 
-/**
- * OAuth resource (the MCP URL). `SUPERMEMORY_MCP_URL` wins; otherwise the
- * resource saved by a login against this API URL, so the OpenCode process does
- * not need the CLI's environment; otherwise `api.*` maps to `mcp.*` + `/mcp`.
- */
+// The OAuth resource (MCP URL). Prefer the one saved at login so the OpenCode
+// process does not need the CLI's environment.
 export function getMcpUrl(apiBaseUrl = getApiBaseUrl()): string {
   if (process.env.SUPERMEMORY_MCP_URL) {
     const configured = normalizeBaseUrl(process.env.SUPERMEMORY_MCP_URL);
@@ -222,10 +215,6 @@ export function getOAuthConfig(apiBaseUrl = getApiBaseUrl()): OAuthConfig {
   return buildOAuthConfig(apiBaseUrl, issuer, getMcpUrl(apiBaseUrl));
 }
 
-/**
- * Bearer for REST/SDK calls, resolved at request time: a static API key when one
- * is configured, otherwise the saved OAuth access token (refreshed when needed).
- */
 export async function getAuthToken(timeoutMs?: number, apiBaseUrl?: string): Promise<string> {
   const apiKey = getApiKey();
   if (apiKey) return apiKey;
@@ -233,10 +222,8 @@ export async function getAuthToken(timeoutMs?: number, apiBaseUrl?: string): Pro
   return getAccessToken(getOAuthConfig(apiBaseUrl ?? getApiBaseUrl()), timeoutMs);
 }
 
-/**
- * The legacy SDK only accepts a static API key. Resolve the bearer at send time
- * so cached SDK clients and retries observe login, rotated tokens and logout.
- */
+// The legacy SDK only accepts a static API key. Resolve the bearer at send time
+// so cached SDK clients and retries observe login, rotated tokens and logout.
 export function createAuthenticatedFetch(apiBaseUrl: string): typeof fetch {
   const base = new URL(apiBaseUrl);
   const basePath = base.pathname.replace(/\/+$/, "");

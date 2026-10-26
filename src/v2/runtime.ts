@@ -517,7 +517,6 @@ export class V2Runtime {
     if (!this.active) return;
 
     if (!this.#configured) {
-      // Hooks still register and stay idle until login, so no restart is needed.
       logger("v2 plugin not authenticated yet - hooks idle until login or SUPERMEMORY_API_KEY");
     }
 

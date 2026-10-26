@@ -135,7 +135,7 @@ export function loadCredentialData(): Credentials | null {
   return credentialCache.data ? { ...credentialCache.data } : null;
 }
 
-// Legacy saved keys stay available; never return an OAuth token to a synchronous caller.
+// Never return an OAuth token to a synchronous caller: it may need a refresh first.
 export function loadCredentials(): string | undefined {
   const data = loadCredentialData();
   return data?.type === "oauth" ? undefined : data?.apiKey;
@@ -388,10 +388,8 @@ async function exchangeToken(
   return data.access_token;
 }
 
-// Rotates the refresh token. The request always runs to completion and saves
-// the replacement, whatever the caller's deadline: aborting it mid-flight would
-// leave the server holding a rotated refresh token we never stored, and the next
-// refresh would fail with invalid_grant and sign the user out.
+// Never abort a refresh mid-flight: the server would rotate a refresh token we never
+// stored, and the next refresh would fail with invalid_grant and sign the user out.
 let pendingRefresh: Promise<string> | null = null;
 
 function refreshCredentials(config: OAuthConfig): Promise<string> {
@@ -453,15 +451,13 @@ export async function getAccessToken(
   return waitFor(refreshCredentials(config), timeoutMs);
 }
 
-// Resolves once any in-flight refresh has saved or failed, so a process that
-// exits explicitly can let the rotated tokens land first.
+// Await before an explicit exit so rotated tokens from an in-flight refresh are saved.
 export async function settleAuth(): Promise<void> {
   while (pendingRefresh) {
     await pendingRefresh.catch(() => {});
   }
 }
 
-/** Revokes a saved OAuth refresh token and removes saved credentials. */
 export async function clearCredentials(): Promise<Credentials | null> {
   return withAuthLock(async (remaining) => {
     const credentials = loadCredentialData();
@@ -482,10 +478,6 @@ export async function clearCredentials(): Promise<Credentials | null> {
   }, REFRESH_REQUEST_TIMEOUT);
 }
 
-/**
- * Runs the browser OAuth 2.1 authorization-code flow (dynamic client
- * registration + S256 PKCE) and saves the tokens. Resolves with the access token.
- */
 export async function startAuthFlow(
   config: OAuthConfig,
   timeoutMs = AUTH_TIMEOUT,

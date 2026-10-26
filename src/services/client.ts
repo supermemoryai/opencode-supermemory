@@ -163,9 +163,7 @@ export class SupermemoryClient {
   }
 
   private getClient(): Supermemory | V5Client {
-    // OpenCode keeps this process alive across login/logout; rebuild when the
-    // effective endpoint changes. Bearers are resolved per request, never cached,
-    // so a cached client stops authenticating as soon as credentials are removed.
+    // Rebuild when the endpoint changes; bearers are resolved per request, never cached.
     const baseUrl = getApiBaseUrl();
     const apiVersion = getApiVersion();
     const clientKey = `${apiVersion} ${baseUrl}`;
