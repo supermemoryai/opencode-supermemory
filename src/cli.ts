@@ -537,7 +537,9 @@ async function login(): Promise<number> {
   }
 
   try {
-    await startAuthFlow(getOAuthConfig());
+    await startAuthFlow(getOAuthConfig(), undefined, {
+      printUrl: process.argv.includes("--print-url"),
+    });
   } catch (error) {
     console.error(`\n✗ Authentication failed: ${error instanceof Error ? error.message : String(error)}`);
     return 1;

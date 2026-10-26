@@ -481,6 +481,7 @@ export async function clearCredentials(): Promise<Credentials | null> {
 export async function startAuthFlow(
   config: OAuthConfig,
   timeoutMs = AUTH_TIMEOUT,
+  { printUrl = false }: { printUrl?: boolean } = {},
 ): Promise<string> {
   return withAuthLock(async (remaining) => {
     const controller = new AbortController();
@@ -580,6 +581,11 @@ export async function startAuthFlow(
           ),
         );
         server.listen(AUTH_PORT, "127.0.0.1", () => {
+          // The Supermemory CLI collects these links to approve several plugins on one consent screen.
+          if (printUrl) {
+            process.stdout.write(`SUPERMEMORY_AUTHORIZE_URL=${authorizationUrl.toString()}\n`);
+            return;
+          }
           console.log("Opening browser for authentication...");
           console.log(`If it doesn't open, visit: ${authorizationUrl.toString()}`);
           openUrl(authorizationUrl).catch(() =>
