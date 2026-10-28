@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { AGENT_ENTITY_CONTEXT } from "./entity-context.js";
+import { SUPPORTING_CONTEXT } from "./entity-context.js";
 import { createCompactionPrompt } from "./compaction-prompt.js";
 import { supermemoryClient } from "./client.js";
 import { log } from "./logger.js";
@@ -275,7 +275,7 @@ export function createCompactionHook(
           sm_capture_mode: "compaction",
           sessionId: sessionID,
         },
-        { entityContext: AGENT_ENTITY_CONTEXT }
+        { entityContext: SUPPORTING_CONTEXT }
       );
 
       if (result.success) {

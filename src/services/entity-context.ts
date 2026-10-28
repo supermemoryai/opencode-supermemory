@@ -1,3 +1,5 @@
+import { CONFIG } from "../config.js";
+
 export const AGENT_ENTITY_CONTEXT = `Shared coding-agent memory for one software repository.
 
 RULES:
@@ -25,3 +27,5 @@ SKIP:
 // every agent must send the same combined context for the shared repository tag.
 export const USER_ENTITY_CONTEXT = AGENT_ENTITY_CONTEXT;
 export const PROJECT_ENTITY_CONTEXT = AGENT_ENTITY_CONTEXT;
+
+export const SUPPORTING_CONTEXT = CONFIG.filterPrompt ?? AGENT_ENTITY_CONTEXT;

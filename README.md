@@ -321,11 +321,16 @@ keep the old content protocol on any endpoint. Failed requests never switch API
 versions or reroute to hosted Supermemory, and existing container names, IDs,
 credentials, capture cadence, and configuration files are not migrated or renamed.
 
-The existing best-effort `filterPrompt` / `shouldLLMFilter` settings update remains
-on the legacy settings endpoint for both protocols. v5 has no equivalent filter
-toggle; the plugin does not replace organization context or request administrator
-permissions. A server without that legacy endpoint cannot apply these settings;
-capture and recall still work, and the failure is recorded in the existing log.
+The plugin never writes organization settings. Without `filterPrompt`, captures carry
+the built-in coding-agent context and the plugin makes no settings call. If you set
+`filterPrompt` (up to 1500 characters; longer values are ignored), it replaces that
+built-in context as the supporting context of the project container: every capture
+sends it, and on v5 the plugin also applies it once at startup with
+`PATCH /ns/{namespace}`. That startup update needs an admin key and an existing
+container; when it fails the failure is logged and the next capture applies the
+prompt instead. The project container is shared with the Claude Code, Codex and
+Cursor plugins, which send the built-in context, so the most recent writer's
+context applies.
 Browser login and account status also retain their separate legacy auth/session
 boundary.
 
@@ -376,6 +381,9 @@ scope, not from a different or malformed response.
 
   // Optional: set exact project container tag (overrides auto-generated tag)
   "projectContainerTag": "my-project-tag",
+
+  // Optional supporting context for memories in the project container (max 1500 characters)
+  "filterPrompt": "Focus on architecture decisions and build tooling.",
 
   // Extra keyword patterns for memory detection (regex)
   "keywordPatterns": ["log\\s+this", "write\\s+down"],

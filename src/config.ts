@@ -20,6 +20,7 @@ const CONFIG_FILES = [
 ];
 
 export const DEFAULT_BASE_URL = "https://api.supermemory.ai";
+export const MAX_SUPPORTING_CONTEXT_CHARS = 1500;
 
 export type RecallMode = "direct" | "advisory" | "off";
 
@@ -65,14 +66,13 @@ const DEFAULT_KEYWORD_PATTERNS = [
   "always\\s+remember",
 ];
 
-const DEFAULTS: Required<Omit<SupermemoryConfig, "apiKey" | "baseUrl" | "apiVersion" | "userContainerTag" | "projectContainerTag" | "recallDirective">> = {
+const DEFAULTS: Required<Omit<SupermemoryConfig, "apiKey" | "baseUrl" | "apiVersion" | "userContainerTag" | "projectContainerTag" | "filterPrompt" | "recallDirective">> = {
   similarityThreshold: 0.55,
   maxMemories: 5,
   maxProjectMemories: 10,
   maxProfileItems: 5,
   injectProfile: true,
   containerTagPrefix: "opencode",
-  filterPrompt: "You are a stateful coding agent. Remember all the information, including but not limited to user's coding preferences, tech stack, behaviours, workflows, and any other relevant details.",
   keywordPatterns: [],
   compactionThreshold: 0.80,
   compactionEnabled: true,
@@ -96,6 +96,12 @@ function validateCompactionThreshold(value: number | undefined): number {
   }
   if (value <= 0 || value > 1) return DEFAULTS.compactionThreshold;
   return value;
+}
+
+function resolveFilterPrompt(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const prompt = value.trim();
+  return prompt && prompt.length <= MAX_SUPPORTING_CONTEXT_CHARS ? prompt : undefined;
 }
 
 function validateCaptureEveryNTurns(
@@ -269,7 +275,7 @@ export const CONFIG = {
   containerTagPrefix: fileConfig.containerTagPrefix ?? DEFAULTS.containerTagPrefix,
   userContainerTag: fileConfig.userContainerTag,
   projectContainerTag: fileConfig.projectContainerTag,
-  filterPrompt: fileConfig.filterPrompt ?? DEFAULTS.filterPrompt,
+  filterPrompt: resolveFilterPrompt(fileConfig.filterPrompt),
   keywordPatterns: [
     ...DEFAULT_KEYWORD_PATTERNS,
     ...(fileConfig.keywordPatterns ?? []).filter(isValidRegex),

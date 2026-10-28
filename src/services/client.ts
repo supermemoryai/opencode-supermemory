@@ -24,7 +24,7 @@ import type {
 
 const TIMEOUT_MS = 30000;
 const TIMEOUT_BACKSTOP_GRACE_MS = 250;
-const SETTINGS_UPDATE_TIMEOUT_MS = 3_000;
+const NAMESPACE_CONTEXT_TIMEOUT_MS = 3_000;
 const MAX_CONVERSATION_CHARS = 100_000;
 const OPENCODE_SOURCE = "opencode";
 
@@ -131,6 +131,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 export class SupermemoryClient {
   private client: Supermemory | V5Client | null = null;
   private clientKey: string | null = null;
+  private namespacesWithContext = new Set<string>();
 
   private formatConversationMessage(message: ConversationMessage): string {
     const content =
@@ -175,42 +176,44 @@ export class SupermemoryClient {
     }
     if (!this.client) {
       this.clientKey = clientKey;
-      const legacyClient = new Supermemory({
-        apiKey: getApiKey() || "oauth",
-        baseURL: baseUrl,
-        fetch: createAuthenticatedFetch(baseUrl),
-        defaultHeaders: { "x-sm-source": OPENCODE_SOURCE },
-      });
       this.client =
         apiVersion === "v5"
           ? new V5Client(
               () => getAuthToken(undefined, baseUrl),
               baseUrl,
-              legacyClient.settings,
               TIMEOUT_MS - TIMEOUT_BACKSTOP_GRACE_MS,
             )
-          : legacyClient;
-      try {
-        void this.client.settings
-          .update(
-            {
-              shouldLLMFilter: true,
-              filterPrompt: CONFIG.filterPrompt,
-            },
-            { timeout: SETTINGS_UPDATE_TIMEOUT_MS, maxRetries: 0 },
-          )
-          .catch((error) => {
-            log("settings.update: best-effort update failed", {
-              error: error instanceof Error ? error.message : String(error),
+          : new Supermemory({
+              apiKey: getApiKey() || "oauth",
+              baseURL: baseUrl,
+              fetch: createAuthenticatedFetch(baseUrl),
+              defaultHeaders: { "x-sm-source": OPENCODE_SOURCE },
             });
-          });
-      } catch (error) {
-        log("settings.update: best-effort update failed", {
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
     }
     return this.client;
+  }
+
+  // Best-effort and once per namespace; captures carry the same prompt, so a failed PATCH still converges.
+  async applyNamespaceContext(
+    namespace: string,
+    supportingContext = CONFIG.filterPrompt,
+  ): Promise<void> {
+    if (!supportingContext || this.namespacesWithContext.has(namespace)) return;
+    this.namespacesWithContext.add(namespace);
+    try {
+      const client = this.getClient();
+      if (!(client instanceof V5Client)) return;
+      await client.updateNamespaceContext(namespace, supportingContext, {
+        timeout: NAMESPACE_CONTEXT_TIMEOUT_MS,
+        maxRetries: 0,
+      });
+      log("applyNamespaceContext: success", { namespace });
+    } catch (error) {
+      log("applyNamespaceContext: best-effort update failed", {
+        namespace,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   async searchMemories(

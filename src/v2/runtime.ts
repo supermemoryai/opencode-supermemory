@@ -26,7 +26,7 @@ import {
   formatContextForPrompt,
   getInjectedProfileFactTexts,
 } from "../services/context.js";
-import { AGENT_ENTITY_CONTEXT } from "../services/entity-context.js";
+import { SUPPORTING_CONTEXT } from "../services/entity-context.js";
 import { log } from "../services/logger.js";
 import {
   executeSupermemoryTool,
@@ -105,6 +105,7 @@ export const SUPERMEMORY_RECALL_INPUT = {
 type RuntimeMemoryClient = Pick<
   SupermemoryClient,
   | "addMemory"
+  | "applyNamespaceContext"
   | "ingestConversation"
   | "getProfileScoped"
   | "searchMemoriesForRecall"
@@ -873,6 +874,9 @@ export class V2Runtime {
       }
       state.directory = directory;
       state.tags = this.#deps.resolveTags(directory);
+      if (this.#deps.configured) {
+        void this.#deps.memoryClient.applyNamespaceContext(state.tags.canonical);
+      }
       return state.tags;
     })();
 
@@ -1060,7 +1064,7 @@ export class V2Runtime {
           turnEnd: batch.endTurn,
         },
         {
-          defaultEntityContext: AGENT_ENTITY_CONTEXT,
+          defaultEntityContext: SUPPORTING_CONTEXT,
           customId: captureId,
           timeoutMs: AUTOMATIC_CAPTURE_TIMEOUT_MS,
         },
@@ -1199,7 +1203,7 @@ export class V2Runtime {
           },
           {
             customId: summary.customId,
-            entityContext: AGENT_ENTITY_CONTEXT,
+            entityContext: SUPPORTING_CONTEXT,
             timeoutMs: AUTOMATIC_CAPTURE_TIMEOUT_MS,
           },
         );
