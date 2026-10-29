@@ -144,4 +144,28 @@ describe("shared supermemory tool", () => {
     expect(result.success).toBe(true);
     expect(containers).toEqual([tags.canonical, "legacy_user"]);
   });
+
+  test("list shows each document's content when v5 has no summary", async () => {
+    const result = JSON.parse(
+      await executeSupermemoryTool({ mode: "list" }, tags, {
+        configured: true,
+        memoryClient: client({
+          listMemoriesScoped: async () => ({
+            success: true,
+            memories: [
+              { id: "doc_1", summary: null, content: "Use bun for builds", title: "Bun" },
+              { id: "doc_2", summary: "Legacy summary", content: "raw" },
+              { id: "doc_3", summary: null, title: "Still processing" },
+            ],
+            pagination: { currentPage: 1, totalItems: 3, totalPages: 1 },
+          }),
+        } as Partial<MemoryToolClient>),
+      }),
+    );
+    expect(result.memories.map((memory: { content: string }) => memory.content)).toEqual([
+      "Use bun for builds",
+      "Legacy summary",
+      "Still processing",
+    ]);
+  });
 });
