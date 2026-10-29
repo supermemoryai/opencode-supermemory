@@ -63,7 +63,7 @@ export class V5Client {
   private sdk: Supermemory;
 
   constructor(
-    apiKey: string,
+    apiKey: string | (() => Promise<string>),
     baseUrl: string,
     readonly settings: {
       update(

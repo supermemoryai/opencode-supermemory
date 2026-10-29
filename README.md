@@ -98,6 +98,11 @@ is safe to re-run; if anything is missing, add it manually:
 bunx opencode-supermemory@latest login
 ```
 
+`login` signs in with OAuth (browser consent, callback on `127.0.0.1:19880`) and
+saves refreshable credentials to `~/.supermemory-opencode/credentials.json`. Running
+OpenCode sessions pick up a login or logout without a restart. `logout` revokes the
+saved refresh token. An existing saved API key keeps working until you run `login`.
+
 For headless environments, set `SUPERMEMORY_API_KEY` manually, or create
 `~/.config/opencode/supermemory.jsonc`:
 
@@ -299,8 +304,9 @@ does not require a migration.
 | `SUPERMEMORY_API_KEY` | Your Supermemory API key (takes precedence over the config file). |
 | `SUPERMEMORY_API_URL` / `SUPERMEMORY_BASE_URL` | Override the Supermemory API base URL. |
 | `SUPERMEMORY_API_VERSION` | Select `legacy` or `v5`, overriding `apiVersion` in the config file. |
-| `SUPERMEMORY_AUTH_URL` | Override the browser-auth base URL. |
-| `SUPERMEMORY_AUTH_TIMEOUT` | Browser-auth timeout in milliseconds (default 5 minutes). |
+| `SUPERMEMORY_MCP_URL` | OAuth resource / MCP URL (default `https://mcp.supermemory.ai/mcp`; required for OAuth against a custom API URL that is not `api.*`). |
+| `SUPERMEMORY_OAUTH_ISSUER` | Override the OAuth issuer (default `<API URL>/api/auth`). |
+| `SUPERMEMORY_AUTH_TIMEOUT` | Browser-login timeout in milliseconds (default 5 minutes). |
 | `SUPERMEMORY_REPO_TAG` | Explicit project-container override, checked before the config value. |
 | `SUPERMEMORY_ISOLATE_WORKTREES` | Set to `true` to key the project container on the worktree path instead of the Git remote. |
 | `SUPERMEMORY_DEBUG` | Set to show `[recall-decision]` lines and enable debug logging. |
