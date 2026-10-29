@@ -289,11 +289,20 @@ The repository hash comes from the normalized Git `origin` remote, so Claude Cod
 Codex, Cursor, and OpenCode use the same container for the same repository.
 Repositories with the same name but different remotes remain isolated. Without an
 origin remote, OpenCode falls back to the repository's real filesystem path.
+Relative local Git origins are resolved against the repository directory, not
+the directory where OpenCode was launched.
+
+If a relative local origin previously produced a launch-directory-dependent tag,
+its corrected tag will differ. Memories in that old container are not automatically
+read or migrated: unrelated repositories may have shared the incorrect tag. To
+keep a known existing container, explicitly configure `projectContainerTag` only
+after verifying that the container belongs to this project.
 
 OpenCode also reads previous `user_project_*`, `repo_<project-name>`,
 `claudecode_project_*`, `codex_user_*`, `codex_project_*`, `opencode_user_*`,
-`opencode_project_*`, `cursor_user_*`, and `cursor_project_*` containers, so upgrading
-does not require a migration.
+`opencode_project_*`, `cursor_user_*`, and `cursor_project_*` containers. Those
+legacy containers remain readable without migration; this does not include the
+incorrect relative-origin containers described above.
 
 ## Configuration
 
