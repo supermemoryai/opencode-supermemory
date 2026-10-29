@@ -9,6 +9,7 @@ import {
   buildTranscriptTurns,
   buildV2RecallDirective,
   mergeTurns,
+  setupV2,
   SUPERMEMORY_RECALL_TOOL_NAME,
   SUPERMEMORY_TOOL_NAME,
   V2Runtime,
@@ -462,5 +463,99 @@ describe("OpenCode 2 runtime", () => {
     });
     expect(h.emitted.map((event) => event.kind)).toEqual(["recalling", "recalled"]);
     h.runtime.cleanup();
+  });
+});
+
+function ownershipContext(directory: string): V2Context {
+  const registration = { dispose: async () => undefined };
+  return {
+    location: { directory },
+    tool: {
+      transform: async () => registration,
+      hook: async () => registration,
+      reload: async () => undefined,
+      list: async () => [],
+    },
+    session: {
+      hook: async () => registration,
+      get: async ({ sessionID }: { sessionID: string }) => ({
+        id: sessionID,
+        location: { directory },
+      }),
+      context: async () => [],
+    },
+    permission: {
+      hook: async () => registration,
+    },
+    rpc: {
+      register: async () => ({
+        ...registration,
+        events: { emit: async () => undefined },
+      }),
+    },
+    event: {
+      subscribe: () => ({
+        [Symbol.asyncIterator]: () => ({
+          next: () => new Promise<IteratorResult<unknown>>(() => undefined),
+        }),
+      }),
+    },
+  } as unknown as V2Context;
+}
+
+function ownershipDeps(): Partial<V2RuntimeDependencies> {
+  return {
+    configured: true,
+    config: {
+      recallMode: "direct",
+      injectProfile: false,
+      captureEveryNTurns: 1,
+      compactionEnabled: false,
+      keywordPatterns: [],
+      maxProjectMemories: 10,
+    } as V2RuntimeDependencies["config"],
+    memoryClient: {
+      searchMemories: async () => ({ success: true, results: [] }),
+      addMemory: async () => ({ success: true, id: "mem_1" }),
+    } as unknown as V2RuntimeDependencies["memoryClient"],
+    executeTool: executeSupermemoryTool,
+    resolveTags: () => tags,
+    logger: () => undefined,
+    checkUpdate: async () => ({
+      currentVersion: "2.0.15",
+      latestVersion: "2.0.15",
+      updateCommand: "bunx opencode-supermemory@latest install",
+    }),
+  };
+}
+
+function ownerFor(directory: string): { generation: number } | undefined {
+  return (
+    globalThis as unknown as Record<
+      symbol,
+      { generation: number } | undefined
+    >
+  )[Symbol.for(`opencode-supermemory.v2.owner:${directory}`)];
+}
+
+describe("OpenCode 2 runtime ownership", () => {
+  test("each project directory owns its runtime; hot reload replaces only the same directory", async () => {
+    const cleanupA1 = await setupV2(ownershipContext("/repo-a"), ownershipDeps());
+    const cleanupB1 = await setupV2(ownershipContext("/repo-b"), ownershipDeps());
+
+    expect(ownerFor("/repo-a")?.generation).toBe(1);
+    expect(ownerFor("/repo-b")?.generation).toBe(1);
+
+    // A same-directory hot reload replaces the previous generation...
+    const cleanupA2 = await setupV2(ownershipContext("/repo-a"), ownershipDeps());
+    expect(ownerFor("/repo-a")?.generation).toBe(2);
+    // ...but a different directory never disposes another directory's runtime.
+    expect(ownerFor("/repo-b")?.generation).toBe(1);
+
+    cleanupA2();
+    cleanupA1();
+    cleanupB1();
+    expect(ownerFor("/repo-a")).toBeUndefined();
+    expect(ownerFor("/repo-b")).toBeUndefined();
   });
 });
