@@ -279,7 +279,7 @@ export async function executeSupermemoryTool(
           count: memories.length,
           memories: memories.map((memory) => ({
             id: memory.id,
-            content: memory.summary,
+            content: memory.summary || memory.content || memory.title || null,
             createdAt: memory.createdAt,
             metadata: memory.metadata,
           })),
