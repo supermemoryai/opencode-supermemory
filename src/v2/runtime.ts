@@ -874,7 +874,7 @@ export class V2Runtime {
       }
       state.directory = directory;
       state.tags = this.#deps.resolveTags(directory);
-      if (this.#deps.configured) {
+      if (this.#configured) {
         void this.#deps.memoryClient.applyNamespaceContext(state.tags.canonical);
       }
       return state.tags;
