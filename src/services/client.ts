@@ -748,6 +748,63 @@ export class SupermemoryClient {
       storedMemoryIds: savedIds,
     };
   }
+
+  async addSession(
+    namespace: string,
+    raw: string,
+    options: {
+      sessionId: string;
+      generation?: number;
+      offset?: number;
+      metadata?: Record<string, string | number>;
+      supportingContext?: string;
+      timeoutMs?: number;
+    },
+  ): Promise<void> {
+    if (!SUPERMEMORY_API_KEY) throw new Error("SUPERMEMORY_API_KEY not set");
+    const baseUrl = getApiBaseUrl().replace(/\/+$/, "");
+    const metadata: Record<string, string | number> = {
+      sm_source: OPENCODE_SOURCE,
+      sm_client: OPENCODE_SOURCE,
+      sm_plugin_version: PLUGIN_VERSION,
+      ...(options.metadata ?? {}),
+    };
+    if (options.generation != null) {
+      metadata.sm_session_generation = options.generation;
+    }
+    if (options.offset != null) metadata.sm_session_offset = options.offset;
+    const body: {
+      content: string;
+      id: string;
+      metadata: Record<string, string | number>;
+      supportingContext?: string;
+    } = { content: raw, id: options.sessionId, metadata };
+    if (options.supportingContext) {
+      body.supportingContext = options.supportingContext;
+    }
+
+    const response = await fetch(
+      `${baseUrl}/ns/${encodeURIComponent(namespace)}/document`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${SUPERMEMORY_API_KEY}`,
+          "Content-Type": "application/json",
+          "x-sm-source": OPENCODE_SOURCE,
+          "x-sm-session": OPENCODE_SOURCE,
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(options.timeoutMs ?? TIMEOUT_MS),
+      },
+    );
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      throw Object.assign(
+        new Error(`Supermemory session ${response.status}: ${text.slice(0, 200)}`),
+        { status: response.status },
+      );
+    }
+  }
 }
 
 export const supermemoryClient = new SupermemoryClient();
