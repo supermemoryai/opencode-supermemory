@@ -151,16 +151,23 @@ function isRecallPermission(value: unknown, effect: "allow" | "deny"): boolean {
   );
 }
 
+function getV1RecallRule(config: JsonObject): unknown {
+  return isObject(config.permission) ? config.permission[RECALL_PERMISSION.action] : undefined;
+}
+
 export function readOpenCodeRegistration(content: string): OpenCodeRegistration {
   const config = parseOpenCodeConfig(content);
   const plugin = Array.isArray(config.plugin) ? config.plugin : [];
   const plugins = Array.isArray(config.plugins) ? config.plugins : [];
   const permissions = Array.isArray(config.permissions) ? config.permissions : [];
+  const v1Rule = getV1RecallRule(config);
   return {
     v1: plugin.some(isSupermemoryPluginEntry),
     v2: plugins.some(isSupermemoryPluginEntry),
-    recallAllowed: permissions.some((entry) => isRecallPermission(entry, "allow")),
-    recallDenied: permissions.some((entry) => isRecallPermission(entry, "deny")),
+    recallAllowed:
+      v1Rule === "allow" || permissions.some((entry) => isRecallPermission(entry, "allow")),
+    recallDenied:
+      v1Rule === "deny" || permissions.some((entry) => isRecallPermission(entry, "deny")),
   };
 }
 
@@ -178,26 +185,32 @@ export function editOpenCodeConfig(rawContent: string): OpenCodeConfigEditResult
   content = addArrayEntry(content, "plugin", V1_PLUGIN_ENTRY, isSupermemoryPluginEntry);
   content = addArrayEntry(content, "plugins", V2_PLUGIN_ENTRY, isSupermemoryPluginEntry);
 
-  const config = parseOpenCodeConfig(content);
+  let config = parseOpenCodeConfig(content);
   const permissions = config.permissions;
   if (permissions !== undefined && !Array.isArray(permissions)) {
     throw new Error('OpenCode config property "permissions" must be an array');
   }
 
-  const permissionEntries = permissions ?? [];
-  if (permissionEntries.some((entry) => isRecallPermission(entry, "deny"))) {
-    warnings.push(
-      'OpenCode 2 permission "supermemory_recall" is explicitly denied; preserving the deny instead of adding an allow.',
-    );
-  } else if (
-    !permissionEntries.some((entry) => isRecallPermission(entry, "allow"))
-  ) {
-    content = addArrayEntry(
+  const legacyAllow = (permissions ?? []).findIndex((entry) => isRecallPermission(entry, "allow"));
+  if (legacyAllow !== -1) {
+    content = applyModification(
       content,
-      "permissions",
-      RECALL_PERMISSION,
-      (entry) => isRecallPermission(entry, "allow"),
+      permissions!.length === 1 ? ["permissions"] : ["permissions", legacyAllow],
+      undefined,
     );
+    config = parseOpenCodeConfig(content);
+  }
+
+  const v1Rule = getV1RecallRule(config);
+  const recallDenied =
+    v1Rule === "deny" ||
+    (permissions ?? []).some((entry) => isRecallPermission(entry, "deny"));
+  if (recallDenied) {
+    warnings.push(
+      'OpenCode permission "supermemory_recall" is explicitly denied; preserving the deny instead of adding an allow.',
+    );
+  } else if (v1Rule === undefined && (config.permission === undefined || isObject(config.permission))) {
+    content = applyModification(content, ["permission", RECALL_PERMISSION.action], "allow");
   }
 
   return {
