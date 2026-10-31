@@ -86,9 +86,10 @@ is safe to re-run; if anything is missing, add it manually:
     "opencode-supermemory",
     // ... other OpenCode 2 plugins
   ],
-  "permissions": [
-    { "action": "supermemory_recall", "resource": "*", "effect": "allow" },
-  ],
+  // OpenCode V1 rejects V2 "permissions"; OpenCode 2 reads this as the same rule
+  "permission": {
+    "supermemory_recall": "allow",
+  },
 }
 ```
 
@@ -220,9 +221,7 @@ OpenCode 2 side by side:
 {
   "plugin": ["opencode-supermemory@latest"],
   "plugins": ["opencode-supermemory"],
-  "permissions": [
-    { "action": "supermemory_recall", "resource": "*", "effect": "allow" },
-  ],
+  "permission": { "supermemory_recall": "allow" },
 }
 ```
 
