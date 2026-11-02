@@ -18,7 +18,8 @@ describe("OpenCode config editor", () => {
     expect(result.changed).toBe(true);
     expect(config.plugin).toEqual([V1_PLUGIN_ENTRY]);
     expect(config.plugins).toEqual([V2_PLUGIN_ENTRY]);
-    expect(config.permissions).toEqual([RECALL_PERMISSION]);
+    expect(config.permission).toEqual({ supermemory_recall: "allow" });
+    expect(config.permissions).toBeUndefined();
     expect(result.warnings).toEqual([]);
   });
 
@@ -36,7 +37,7 @@ describe("OpenCode config editor", () => {
     expect(first.content).not.toContain(V1_PLUGIN_ENTRY);
     const config = JSON.parse(first.content.replace(/^\s*\/\/.*$/gm, "").replace(/,(\s*[}\]])/g, "$1"));
     expect(config.plugins).toEqual([V2_PLUGIN_ENTRY]);
-    expect(config.permissions).toEqual([RECALL_PERMISSION]);
+    expect(config.permission).toEqual({ supermemory_recall: "allow" });
 
     const second = editOpenCodeConfig(first.content);
     expect(second.changed).toBe(false);
@@ -55,9 +56,24 @@ describe("OpenCode config editor", () => {
     const content = JSON.stringify({
       plugin: ["opencode-supermemory@2.0.13"],
       plugins: [{ package: "opencode-supermemory@latest", options: {} }],
-      permissions: [RECALL_PERMISSION],
+      permission: { supermemory_recall: "allow" },
     });
     expect(editOpenCodeConfig(content).changed).toBe(false);
+  });
+
+  test("moves the V2 recall rule that OpenCode V1 rejects into V1 permission rules", () => {
+    const other = { action: "bash", resource: "*", effect: "ask" };
+    const onlyRecall = JSON.parse(
+      editOpenCodeConfig(JSON.stringify({ permissions: [RECALL_PERMISSION] })).content,
+    );
+    expect(onlyRecall.permissions).toBeUndefined();
+    expect(onlyRecall.permission).toEqual({ supermemory_recall: "allow" });
+
+    const withOther = JSON.parse(
+      editOpenCodeConfig(JSON.stringify({ permissions: [RECALL_PERMISSION, other] })).content,
+    );
+    expect(withOther.permissions).toEqual([other]);
+    expect(withOther.permission).toEqual({ supermemory_recall: "allow" });
   });
 
   test("keeps an explicit recall deny and warns instead of overriding it", () => {
@@ -66,8 +82,13 @@ describe("OpenCode config editor", () => {
     const config = JSON.parse(result.content);
 
     expect(config.permissions).toEqual([deny]);
+    expect(config.permission).toBeUndefined();
     expect(result.warnings).toHaveLength(1);
     expect(readOpenCodeRegistration(result.content).recallDenied).toBe(true);
+
+    const v1Deny = editOpenCodeConfig(JSON.stringify({ permission: { supermemory_recall: "deny" } }));
+    expect(JSON.parse(v1Deny.content).permission).toEqual({ supermemory_recall: "deny" });
+    expect(v1Deny.warnings).toHaveLength(1);
   });
 
   test("rejects configs whose arrays are not arrays", () => {
