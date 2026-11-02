@@ -261,14 +261,17 @@ export class V5Client {
                     }, remainingMs);
                   }),
                 ]);
+                // The list already filtered by scope and reads omit sm_* keys, so only a stated mismatch is wrong.
+                const scopeMatches =
+                  request.filters?.AND.every(({ key, value }) => {
+                    const actual = document.metadata?.[key];
+                    return actual === undefined || actual === value;
+                  }) ?? true;
                 if (
                   document.id === item.id &&
                   (typeof document.content === "string" ||
                     document.content === null) &&
-                  (request.filters?.AND.every(
-                    ({ key, value }) => document.metadata?.[key] === value,
-                  ) ??
-                    true)
+                  scopeMatches
                 ) {
                   content = document.content;
                 } else {
