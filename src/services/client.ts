@@ -175,21 +175,19 @@ export class SupermemoryClient {
     }
     if (!this.client) {
       this.clientKey = clientKey;
-      const legacyClient = new Supermemory({
-        apiKey: getApiKey() || "oauth",
-        baseURL: baseUrl,
-        fetch: createAuthenticatedFetch(baseUrl),
-        defaultHeaders: { "x-sm-source": OPENCODE_SOURCE },
-      });
       this.client =
         apiVersion === "v5"
           ? new V5Client(
               () => getAuthToken(undefined, baseUrl),
               baseUrl,
-              legacyClient.settings,
               TIMEOUT_MS - TIMEOUT_BACKSTOP_GRACE_MS,
             )
-          : legacyClient;
+          : new Supermemory({
+              apiKey: getApiKey() || "oauth",
+              baseURL: baseUrl,
+              fetch: createAuthenticatedFetch(baseUrl),
+              defaultHeaders: { "x-sm-source": OPENCODE_SOURCE },
+            });
       try {
         void this.client.settings
           .update(

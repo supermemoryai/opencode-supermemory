@@ -65,12 +65,6 @@ export class V5Client {
   constructor(
     apiKey: string | (() => Promise<string>),
     baseUrl: string,
-    readonly settings: {
-      update(
-        body: { shouldLLMFilter: boolean; filterPrompt: string },
-        options?: LegacyOptions,
-      ): Promise<unknown>;
-    },
     private readonly listBudgetMs: number,
   ) {
     this.sdk = new Supermemory({
@@ -81,6 +75,17 @@ export class V5Client {
       maxRetries: 2,
     });
   }
+
+  readonly settings = {
+    update: (
+      body: { shouldLLMFilter: boolean; filterPrompt: string },
+      options?: LegacyOptions,
+    ): Promise<unknown> =>
+      this.sdk.organization.update(
+        { organizationalContext: body.filterPrompt },
+        requestOptions(options),
+      ),
+  };
 
   readonly search = {
     memories: async (
