@@ -1,7 +1,7 @@
 import { isConfigured } from "../config.js";
 import type { MemoryScope, MemoryType } from "../types/index.js";
 import { supermemoryClient, type SupermemoryClient } from "./client.js";
-import { AGENT_ENTITY_CONTEXT } from "./entity-context.js";
+import { SUPPORTING_CONTEXT } from "./entity-context.js";
 import { isFullyPrivate, stripPrivateContent } from "./privacy.js";
 import { formatRecallHit, normalizeRecallResult } from "./recall-results.js";
 import type { ResolvedTags } from "./tags.js";
@@ -151,7 +151,7 @@ export async function executeSupermemoryTool(
             sm_scope: internalScope,
             sm_capture_mode: "tool",
           },
-          { entityContext: AGENT_ENTITY_CONTEXT },
+          { entityContext: SUPPORTING_CONTEXT },
         );
 
         if (!result.success) {

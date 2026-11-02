@@ -127,6 +127,10 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
     ? createCaptureHook(ctx, tags, { onSaved: () => activity.saved() })
     : null;
 
+  if (isConfigured()) {
+    void supermemoryClient.applyNamespaceContext(tags.canonical);
+  }
+
   return {
     "chat.message": async (input, output) => {
       if (!isConfigured()) return;

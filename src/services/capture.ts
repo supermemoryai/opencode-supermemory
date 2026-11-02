@@ -4,7 +4,7 @@ import type { Part } from "@opencode-ai/sdk";
 import { CONFIG } from "../config.js";
 import type { ConversationMessage } from "../types/index.js";
 import { supermemoryClient } from "./client.js";
-import { AGENT_ENTITY_CONTEXT } from "./entity-context.js";
+import { SUPPORTING_CONTEXT } from "./entity-context.js";
 import { log } from "./logger.js";
 import { isFullyPrivate, stripPrivateContent } from "./privacy.js";
 import type { ResolvedTags } from "./tags.js";
@@ -268,7 +268,7 @@ export function createCaptureHook(
           turnEnd: batch.endTurn,
         },
         {
-          defaultEntityContext: AGENT_ENTITY_CONTEXT,
+          defaultEntityContext: SUPPORTING_CONTEXT,
           customId: captureId,
           timeoutMs: AUTOMATIC_CAPTURE_TIMEOUT_MS,
         },

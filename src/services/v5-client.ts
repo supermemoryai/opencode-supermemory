@@ -65,12 +65,6 @@ export class V5Client {
   constructor(
     apiKey: string | (() => Promise<string>),
     baseUrl: string,
-    readonly settings: {
-      update(
-        body: { shouldLLMFilter: boolean; filterPrompt: string },
-        options?: LegacyOptions,
-      ): Promise<unknown>;
-    },
     private readonly listBudgetMs: number,
   ) {
     this.sdk = new Supermemory({
@@ -299,6 +293,18 @@ export class V5Client {
       return { memories, pagination: result.pagination };
     },
   };
+
+  async updateNamespaceContext(
+    namespace: string,
+    supportingContext: string,
+    options?: LegacyOptions,
+  ): Promise<void> {
+    await this.sdk.namespaces.update(
+      namespace,
+      { supportingContext },
+      requestOptions(options),
+    );
+  }
 
   async deleteDocument(id: string, namespaces: string[]): Promise<void> {
     if (namespaces.length === 0)

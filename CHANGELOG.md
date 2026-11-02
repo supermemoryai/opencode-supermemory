@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.1.1
+
+- Stop writing the organization's `filterPrompt` / `shouldLLMFilter` settings on startup, so the plugin no longer overwrites organization context.
+- Apply a configured `filterPrompt` as the project container's supporting context instead: captures send it, and v5 sets it once at startup with `PATCH /ns/{namespace}`. Without one, no settings are written.
+
 ## 2.0.16
 
 - Use the official pinned Supermemory 5.0.1 SDK for hosted content, preserving namespace strings, batch IDs, metadata, search defaults, capture cadence, and permissions.

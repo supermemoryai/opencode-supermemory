@@ -248,6 +248,7 @@ function harness(
       return { success: true, id: "mem_1" };
     },
     deleteMemory: async () => ({ success: true }),
+    applyNamespaceContext: async () => undefined,
   };
 
   const runtime = new V2Runtime(ctx as unknown as V2Context, {
