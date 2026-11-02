@@ -24,7 +24,6 @@ import type {
 
 const TIMEOUT_MS = 30000;
 const TIMEOUT_BACKSTOP_GRACE_MS = 250;
-const SETTINGS_UPDATE_TIMEOUT_MS = 3_000;
 const MAX_CONVERSATION_CHARS = 100_000;
 const OPENCODE_SOURCE = "opencode";
 
@@ -188,25 +187,6 @@ export class SupermemoryClient {
               fetch: createAuthenticatedFetch(baseUrl),
               defaultHeaders: { "x-sm-source": OPENCODE_SOURCE },
             });
-      try {
-        void this.client.settings
-          .update(
-            {
-              shouldLLMFilter: true,
-              filterPrompt: CONFIG.filterPrompt,
-            },
-            { timeout: SETTINGS_UPDATE_TIMEOUT_MS, maxRetries: 0 },
-          )
-          .catch((error) => {
-            log("settings.update: best-effort update failed", {
-              error: error instanceof Error ? error.message : String(error),
-            });
-          });
-      } catch (error) {
-        log("settings.update: best-effort update failed", {
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
     }
     return this.client;
   }

@@ -76,17 +76,6 @@ export class V5Client {
     });
   }
 
-  readonly settings = {
-    update: (
-      body: { shouldLLMFilter: boolean; filterPrompt: string },
-      options?: LegacyOptions,
-    ): Promise<unknown> =>
-      this.sdk.organization.update(
-        { organizationalContext: body.filterPrompt },
-        requestOptions(options),
-      ),
-  };
-
   readonly search = {
     memories: async (
       request: ScopedRequest & {

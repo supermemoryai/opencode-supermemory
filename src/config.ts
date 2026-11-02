@@ -35,7 +35,6 @@ interface SupermemoryConfig {
   containerTagPrefix?: string;
   userContainerTag?: string;
   projectContainerTag?: string;
-  filterPrompt?: string;
   keywordPatterns?: string[];
   compactionThreshold?: number;
   /** OpenCode 2 only: enrich native compaction with project memories and save summaries. */
@@ -72,7 +71,6 @@ const DEFAULTS: Required<Omit<SupermemoryConfig, "apiKey" | "baseUrl" | "apiVers
   maxProfileItems: 5,
   injectProfile: true,
   containerTagPrefix: "opencode",
-  filterPrompt: "You are a stateful coding agent. Remember all the information, including but not limited to user's coding preferences, tech stack, behaviours, workflows, and any other relevant details.",
   keywordPatterns: [],
   compactionThreshold: 0.80,
   compactionEnabled: true,
@@ -269,7 +267,6 @@ export const CONFIG = {
   containerTagPrefix: fileConfig.containerTagPrefix ?? DEFAULTS.containerTagPrefix,
   userContainerTag: fileConfig.userContainerTag,
   projectContainerTag: fileConfig.projectContainerTag,
-  filterPrompt: fileConfig.filterPrompt ?? DEFAULTS.filterPrompt,
   keywordPatterns: [
     ...DEFAULT_KEYWORD_PATTERNS,
     ...(fileConfig.keywordPatterns ?? []).filter(isValidRegex),
