@@ -24,7 +24,6 @@ import type {
 
 const TIMEOUT_MS = 30000;
 const TIMEOUT_BACKSTOP_GRACE_MS = 250;
-const SETTINGS_UPDATE_TIMEOUT_MS = 3_000;
 const MAX_CONVERSATION_CHARS = 100_000;
 const OPENCODE_SOURCE = "opencode";
 
@@ -175,40 +174,19 @@ export class SupermemoryClient {
     }
     if (!this.client) {
       this.clientKey = clientKey;
-      const legacyClient = new Supermemory({
-        apiKey: getApiKey() || "oauth",
-        baseURL: baseUrl,
-        fetch: createAuthenticatedFetch(baseUrl),
-        defaultHeaders: { "x-sm-source": OPENCODE_SOURCE },
-      });
       this.client =
         apiVersion === "v5"
           ? new V5Client(
               () => getAuthToken(undefined, baseUrl),
               baseUrl,
-              legacyClient.settings,
               TIMEOUT_MS - TIMEOUT_BACKSTOP_GRACE_MS,
             )
-          : legacyClient;
-      try {
-        void this.client.settings
-          .update(
-            {
-              shouldLLMFilter: true,
-              filterPrompt: CONFIG.filterPrompt,
-            },
-            { timeout: SETTINGS_UPDATE_TIMEOUT_MS, maxRetries: 0 },
-          )
-          .catch((error) => {
-            log("settings.update: best-effort update failed", {
-              error: error instanceof Error ? error.message : String(error),
+          : new Supermemory({
+              apiKey: getApiKey() || "oauth",
+              baseURL: baseUrl,
+              fetch: createAuthenticatedFetch(baseUrl),
+              defaultHeaders: { "x-sm-source": OPENCODE_SOURCE },
             });
-          });
-      } catch (error) {
-        log("settings.update: best-effort update failed", {
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
     }
     return this.client;
   }

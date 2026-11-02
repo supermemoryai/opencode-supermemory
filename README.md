@@ -320,13 +320,10 @@ keep the old content protocol on any endpoint. Failed requests never switch API
 versions or reroute to hosted Supermemory, and existing container names, IDs,
 credentials, capture cadence, and configuration files are not migrated or renamed.
 
-The existing best-effort `filterPrompt` / `shouldLLMFilter` settings update remains
-on the legacy settings endpoint for both protocols. v5 has no equivalent filter
-toggle; the plugin does not replace organization context or request administrator
-permissions. A server without that legacy endpoint cannot apply these settings;
-capture and recall still work, and the failure is recorded in the existing log.
-Browser login and account status also retain their separate legacy auth/session
-boundary.
+The plugin never changes organization settings. Extraction guidance travels with
+each saved document as `entityContext`, so it applies only to OpenCode's own
+memories. Account status reads `/session`; only legacy mode falls back to
+`/v3/session` for older servers.
 
 v5 capture uses document POST append/diff with `dreaming: "dynamic"`; accepted
 documents may take minutes to form recallable memories. The plugin does not enable
