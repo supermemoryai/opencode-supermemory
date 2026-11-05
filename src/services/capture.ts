@@ -10,6 +10,33 @@ import { isFullyPrivate, stripPrivateContent } from "./privacy.js";
 import type { ResolvedTags } from "./tags.js";
 
 export const AUTOMATIC_CAPTURE_TIMEOUT_MS = 3_000;
+export const MAX_CAPTURE_ATTEMPTS = 3;
+
+/**
+ * Bounds how often one batch is re-sent after failed writes. A write that timed
+ * out on the client may still have reached the server, so retrying it on every
+ * later turn stores the same conversation again each time.
+ */
+export class CaptureRetryBudget {
+  readonly #failures = new Map<string, number>();
+
+  constructor(private readonly maxAttempts = MAX_CAPTURE_ATTEMPTS) {}
+
+  /** Records a failed write. Returns true once the batch should stop retrying. */
+  recordFailure(captureId: string): boolean {
+    const failures = (this.#failures.get(captureId) ?? 0) + 1;
+    if (failures >= this.maxAttempts) {
+      this.#failures.delete(captureId);
+      return true;
+    }
+    this.#failures.set(captureId, failures);
+    return false;
+  }
+
+  recordSuccess(captureId: string): void {
+    this.#failures.delete(captureId);
+  }
+}
 
 interface CaptureMessageInfo {
   id: string;
@@ -220,6 +247,7 @@ export function createCaptureHook(
   const snapshots = new Map<string, CaptureTurn[]>();
   const activeSessions = new Set<string>();
   const completedCaptureIds = new Set<string>();
+  const retries = new CaptureRetryBudget();
   const inFlight = new Map<string, Promise<void>>();
 
   async function refreshSnapshot(sessionID: string): Promise<CaptureTurn[]> {
@@ -282,6 +310,7 @@ export function createCaptureHook(
 
     if (result.success) {
       completedCaptureIds.add(captureId);
+      retries.recordSuccess(captureId);
       options?.onSaved?.();
       log("[capture] conversation batch saved", {
         sessionID,
@@ -292,14 +321,21 @@ export function createCaptureHook(
       return true;
     }
 
-    log("[capture] failed to save conversation batch", {
-      sessionID,
-      reason,
-      startTurn: batch.startTurn,
-      endTurn: batch.endTurn,
-      error: result.error,
-    });
-    return false;
+    const exhausted = retries.recordFailure(captureId);
+    if (exhausted) completedCaptureIds.add(captureId);
+    log(
+      exhausted
+        ? "[capture] giving up on conversation batch after repeated failures"
+        : "[capture] failed to save conversation batch",
+      {
+        sessionID,
+        reason,
+        startTurn: batch.startTurn,
+        endTurn: batch.endTurn,
+        error: result.error,
+      },
+    );
+    return exhausted;
   }
 
   async function captureCadence(
