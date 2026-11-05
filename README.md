@@ -86,9 +86,10 @@ is safe to re-run; if anything is missing, add it manually:
     "opencode-supermemory",
     // ... other OpenCode 2 plugins
   ],
-  "permissions": [
-    { "action": "supermemory_recall", "resource": "*", "effect": "allow" },
-  ],
+  // OpenCode V1 rejects V2 "permissions"; OpenCode 2 reads this as the same rule
+  "permission": {
+    "supermemory_recall": "allow",
+  },
 }
 ```
 
@@ -97,6 +98,11 @@ is safe to re-run; if anything is missing, add it manually:
 ```bash
 bunx opencode-supermemory@latest login
 ```
+
+`login` signs in with OAuth (browser consent, callback on `127.0.0.1:19880`) and
+saves refreshable credentials to `~/.supermemory-opencode/credentials.json`. Running
+OpenCode sessions pick up a login or logout without a restart. `logout` revokes the
+saved refresh token. An existing saved API key keeps working until you run `login`.
 
 For headless environments, set `SUPERMEMORY_API_KEY` manually, or create
 `~/.config/opencode/supermemory.jsonc`:
@@ -167,7 +173,7 @@ Completed conversations are captured automatically:
 - Any remaining turns are flushed when the session is deleted or the OpenCode
   instance shuts down.
 - Synthetic plugin context is excluded and `<private>` content is redacted.
-- Stable capture IDs make repeated lifecycle events idempotent.
+- Stable capture IDs retain batch identity across repeated lifecycle events; they do not guarantee exactly-once processing or billing after an ambiguous response.
 
 ### Keyword Detection
 
@@ -220,9 +226,7 @@ OpenCode 2 side by side:
 {
   "plugin": ["opencode-supermemory@latest"],
   "plugins": ["opencode-supermemory"],
-  "permissions": [
-    { "action": "supermemory_recall", "resource": "*", "effect": "allow" },
-  ],
+  "permission": { "supermemory_recall": "allow" },
 }
 ```
 
@@ -298,13 +302,39 @@ does not require a migration.
 | --- | --- |
 | `SUPERMEMORY_API_KEY` | Your Supermemory API key (takes precedence over the config file). |
 | `SUPERMEMORY_API_URL` / `SUPERMEMORY_BASE_URL` | Override the Supermemory API base URL. |
-| `SUPERMEMORY_AUTH_URL` | Override the browser-auth base URL. |
-| `SUPERMEMORY_AUTH_TIMEOUT` | Browser-auth timeout in milliseconds (default 5 minutes). |
+| `SUPERMEMORY_API_VERSION` | Select `legacy` or `v5`, overriding `apiVersion` in the config file. |
+| `SUPERMEMORY_MCP_URL` | OAuth resource / MCP URL (default `https://mcp.supermemory.ai/mcp`; required for OAuth against a custom API URL that is not `api.*`). |
+| `SUPERMEMORY_OAUTH_ISSUER` | Override the OAuth issuer (default `<API URL>/api/auth`). |
+| `SUPERMEMORY_AUTH_TIMEOUT` | Browser-login timeout in milliseconds (default 5 minutes). |
 | `SUPERMEMORY_REPO_TAG` | Explicit project-container override, checked before the config value. |
 | `SUPERMEMORY_ISOLATE_WORKTREES` | Set to `true` to key the project container on the worktree path instead of the Git remote. |
 | `SUPERMEMORY_DEBUG` | Set to show `[recall-decision]` lines and enable debug logging. |
 
 ### `~/.config/opencode/supermemory.jsonc`
+
+Hosted content calls use the official Supermemory v5 SDK. Custom base URLs default
+to the bundled legacy SDK so existing self-hosted servers, including 0.0.8, keep
+working. After independently upgrading a custom server to support v5, opt in with
+`"apiVersion": "v5"` or `SUPERMEMORY_API_VERSION=v5`. Set `legacy` explicitly to
+keep the old content protocol on any endpoint. Failed requests never switch API
+versions or reroute to hosted Supermemory, and existing container names, IDs,
+credentials, capture cadence, and configuration files are not migrated or renamed.
+
+The plugin never changes organization settings. Extraction guidance travels with
+each saved document as `entityContext`, so it applies only to OpenCode's own
+memories. Account status reads `/session`; only legacy mode falls back to
+`/v3/session` for older servers.
+
+v5 capture uses document POST append/diff with `dreaming: "dynamic"`; accepted
+documents may take minutes to form recallable memories. The plugin does not enable
+the extra-billable instant mode. Profiles normalize fact objects to text and issue
+a separate search only when a query is requested. Document lists fetch canonical
+content per document to retain the previous content-inclusive response, so lists
+and compaction can require additional requests under the existing timeout budget.
+Individual failed, invalid or late content reads retain the listed document's
+identity, summary and lifecycle fields; hydration uses the remaining list budget
+with a return grace. Content is accepted only from the matching document ID and
+scope, not from a different or malformed response.
 
 ```jsonc
 {

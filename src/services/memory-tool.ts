@@ -75,7 +75,7 @@ export async function executeSupermemoryTool(
     return JSON.stringify({
       success: false,
       error:
-        "SUPERMEMORY_API_KEY not set. Set it in your environment to use Supermemory.",
+        "Supermemory is not authenticated. Run `bunx opencode-supermemory@latest login` (or /supermemory-login), or set SUPERMEMORY_API_KEY.",
     });
   }
 

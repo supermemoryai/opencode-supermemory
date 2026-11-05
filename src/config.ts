@@ -2,7 +2,15 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { stripJsoncComments } from "./services/jsonc.js";
-import { loadCredentials } from "./services/auth.js";
+import {
+  authRequired,
+  getAccessToken,
+  getOAuthConfig as buildOAuthConfig,
+  hasOAuthCredentials,
+  loadCredentialData,
+  loadCredentials,
+  type OAuthConfig,
+} from "./services/auth.js";
 
 const CONFIG_DIR = join(homedir(), ".config", "opencode");
 export { PLUGIN_VERSION } from "./version.js";
@@ -18,6 +26,7 @@ export type RecallMode = "direct" | "advisory" | "off";
 interface SupermemoryConfig {
   apiKey?: string;
   baseUrl?: string;
+  apiVersion?: "legacy" | "v5";
   similarityThreshold?: number;
   maxMemories?: number;
   maxProjectMemories?: number;
@@ -26,7 +35,6 @@ interface SupermemoryConfig {
   containerTagPrefix?: string;
   userContainerTag?: string;
   projectContainerTag?: string;
-  filterPrompt?: string;
   keywordPatterns?: string[];
   compactionThreshold?: number;
   /** OpenCode 2 only: enrich native compaction with project memories and save summaries. */
@@ -56,14 +64,13 @@ const DEFAULT_KEYWORD_PATTERNS = [
   "always\\s+remember",
 ];
 
-const DEFAULTS: Required<Omit<SupermemoryConfig, "apiKey" | "baseUrl" | "userContainerTag" | "projectContainerTag" | "recallDirective">> = {
+const DEFAULTS: Required<Omit<SupermemoryConfig, "apiKey" | "baseUrl" | "apiVersion" | "userContainerTag" | "projectContainerTag" | "recallDirective">> = {
   similarityThreshold: 0.55,
   maxMemories: 5,
   maxProjectMemories: 10,
   maxProfileItems: 5,
   injectProfile: true,
   containerTagPrefix: "opencode",
-  filterPrompt: "You are a stateful coding agent. Remember all the information, including but not limited to user's coding preferences, tech stack, behaviours, workflows, and any other relevant details.",
   keywordPatterns: [],
   compactionThreshold: 0.80,
   compactionEnabled: true,
@@ -135,13 +142,12 @@ function loadRawConfig(): { config: SupermemoryConfig; existed: boolean } {
 
 const { config: fileConfig, existed: configExisted } = loadRawConfig();
 
-function getApiKey(): string | undefined {
+// API keys take precedence over OAuth. Never returns an OAuth token.
+export function getApiKey(): string | undefined {
   if (process.env.SUPERMEMORY_API_KEY) return process.env.SUPERMEMORY_API_KEY;
   if (fileConfig.apiKey) return fileConfig.apiKey;
-  return loadCredentials()?.apiKey;
+  return loadCredentials();
 }
-
-export const SUPERMEMORY_API_KEY = getApiKey();
 
 function normalizeBaseUrl(baseUrl: unknown): string | null {
   if (typeof baseUrl !== "string" || !baseUrl.trim()) return null;
@@ -163,13 +169,90 @@ export function getApiBaseUrl(): string {
     process.env.SUPERMEMORY_API_URL ||
     process.env.SUPERMEMORY_BASE_URL ||
     fileConfig.baseUrl ||
-    loadCredentials()?.apiBaseUrl ||
+    loadCredentialData()?.apiBaseUrl ||
     DEFAULT_BASE_URL;
   const normalized = normalizeBaseUrl(configured);
   if (!normalized) {
     throw new Error("Invalid baseUrl: expected an absolute http(s) URL");
   }
   return normalized;
+}
+
+function savedOAuthFor(apiBaseUrl: string) {
+  const saved = loadCredentialData();
+  return saved?.type === "oauth" && saved.apiBaseUrl === apiBaseUrl ? saved : undefined;
+}
+
+// The OAuth resource (MCP URL). Prefer the one saved at login so the OpenCode
+// process does not need the CLI's environment.
+export function getMcpUrl(apiBaseUrl = getApiBaseUrl()): string {
+  if (process.env.SUPERMEMORY_MCP_URL) {
+    const configured = normalizeBaseUrl(process.env.SUPERMEMORY_MCP_URL);
+    if (!configured) throw new Error("Invalid SUPERMEMORY_MCP_URL");
+    return configured;
+  }
+  const saved = savedOAuthFor(apiBaseUrl);
+  if (saved?.resource) return saved.resource;
+  const api = new URL(apiBaseUrl);
+  if (api.hostname.startsWith("api.")) {
+    api.hostname = api.hostname.replace(/^api\./, "mcp.");
+    api.pathname = "/mcp";
+    api.search = "";
+    api.hash = "";
+    return api.toString();
+  }
+  throw new Error("Set SUPERMEMORY_MCP_URL for OAuth on a custom Supermemory backend.");
+}
+
+/** OAuth issuer/resource for an API URL (HTTPS required except loopback). */
+export function getOAuthConfig(apiBaseUrl = getApiBaseUrl()): OAuthConfig {
+  const issuer =
+    process.env.SUPERMEMORY_OAUTH_ISSUER ||
+    savedOAuthFor(apiBaseUrl)?.issuer ||
+    `${apiBaseUrl}/api/auth`;
+  return buildOAuthConfig(apiBaseUrl, issuer, getMcpUrl(apiBaseUrl));
+}
+
+export async function getAuthToken(timeoutMs?: number, apiBaseUrl?: string): Promise<string> {
+  const apiKey = getApiKey();
+  if (apiKey) return apiKey;
+  if (loadCredentialData()?.type !== "oauth") throw authRequired();
+  return getAccessToken(getOAuthConfig(apiBaseUrl ?? getApiBaseUrl()), timeoutMs);
+}
+
+// The legacy SDK only accepts a static API key. Resolve the bearer at send time
+// so cached SDK clients and retries observe login, rotated tokens and logout.
+export function createAuthenticatedFetch(apiBaseUrl: string): typeof fetch {
+  const base = new URL(apiBaseUrl);
+  const basePath = base.pathname.replace(/\/+$/, "");
+  const authenticatedFetch = async (
+    input: Parameters<typeof fetch>[0],
+    init?: Parameters<typeof fetch>[1],
+  ): Promise<Response> => {
+    const target = new URL(input instanceof Request ? input.url : input.toString());
+    if (target.origin !== base.origin || !target.pathname.startsWith(`${basePath}/`)) {
+      throw authRequired();
+    }
+    const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+    signal?.throwIfAborted();
+    const token = await getAuthToken(undefined, apiBaseUrl);
+    signal?.throwIfAborted();
+    const headers = new Headers(
+      init?.headers ?? (input instanceof Request ? input.headers : undefined),
+    );
+    headers.set("Authorization", `Bearer ${token}`);
+    return fetch(input, { ...init, headers });
+  };
+  return authenticatedFetch as typeof fetch;
+}
+
+export function getApiVersion(): "legacy" | "v5" {
+  const version = process.env.SUPERMEMORY_API_VERSION ?? fileConfig.apiVersion;
+  if (version !== undefined) {
+    if (version === "legacy" || version === "v5") return version;
+    throw new Error('Invalid apiVersion: expected "legacy" or "v5"');
+  }
+  return getApiBaseUrl() === DEFAULT_BASE_URL ? "v5" : "legacy";
 }
 
 export const CONFIG_FILE = CONFIG_FILES[1];
@@ -184,7 +267,6 @@ export const CONFIG = {
   containerTagPrefix: fileConfig.containerTagPrefix ?? DEFAULTS.containerTagPrefix,
   userContainerTag: fileConfig.userContainerTag,
   projectContainerTag: fileConfig.projectContainerTag,
-  filterPrompt: fileConfig.filterPrompt ?? DEFAULTS.filterPrompt,
   keywordPatterns: [
     ...DEFAULT_KEYWORD_PATTERNS,
     ...(fileConfig.keywordPatterns ?? []).filter(isValidRegex),
@@ -205,8 +287,14 @@ export const CONFIG = {
   recallDirective: fileConfig.recallDirective ?? null,
 };
 
+/** Resolved on every call so login and logout apply without restarting OpenCode. */
 export function isConfigured(): boolean {
-  return !!SUPERMEMORY_API_KEY;
+  if (getApiKey()) return true;
+  try {
+    return hasOAuthCredentials(getOAuthConfig());
+  } catch {
+    return false;
+  }
 }
 
 export function getRecallConfig(): {

@@ -12,7 +12,8 @@
         "@types/bun": "latest",
         "jsonc-parser": "3.3.1",
         "solid-js": "1.9.15",
-        "supermemory": "^4.0.0",
+        "supermemory": "5.0.1",
+        "supermemory-legacy": "npm:supermemory@4.0.0",
         "typescript": "^5.7.3",
       },
       "peerDependencies": {
@@ -696,7 +697,9 @@
 
     "strip-ansi-cjs": ["strip-ansi@6.0.1", "", { "dependencies": { "ansi-regex": "^5.0.1" } }, "sha512-Y38VPSHcqkFrCpFnQ9vuSXmquuv5oXOKpGeT6aGrr3o3Gc9AlVa6JBfUSOCnbxGGZF+/0ooI7KrPuUSztUdU5A=="],
 
-    "supermemory": ["supermemory@4.0.0", "", {}, "sha512-xMN05PQ8kTv8DuXa2qf8h/9LaRI7v1Kz3Tutt97JPq+PzhGabKLv5YVbSgqHiPX5yXcSUBVBNYPPbhAQMF6GYQ=="],
+    "supermemory": ["supermemory@5.0.1", "", { "bin": { "supermemory": "bin/cli.mjs" } }, "sha512-XCgFEioj4PGREU/J3pOK7L4U/akZroPR6XCDK6/pxGrrJa28gH1kNPB/Cxhq6nVL3fwxdhwciyPbRImaDzq8/Q=="],
+
+    "supermemory-legacy": ["supermemory@4.0.0", "", {}, "sha512-xMN05PQ8kTv8DuXa2qf8h/9LaRI7v1Kz3Tutt97JPq+PzhGabKLv5YVbSgqHiPX5yXcSUBVBNYPPbhAQMF6GYQ=="],
 
     "supports-preserve-symlinks-flag": ["supports-preserve-symlinks-flag@1.0.0", "", {}, "sha512-ot0WnXS9fgdkgIcePe6RHNk1WA8+muPa6cSjeR3V8K27q9BB1rTE3R1p7Hv0z1ZyAc8s6Vvv8DIyWf681MAt0w=="],
 
