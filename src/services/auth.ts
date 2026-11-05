@@ -589,9 +589,7 @@ export async function startAuthFlow(
           console.log("Opening browser for authentication...");
           console.log(`If it doesn't open, visit: ${authorizationUrl.toString()}`);
           openUrl(authorizationUrl).catch(() =>
-            reject(
-              new Error("Failed to open the browser. Retry login from an interactive terminal."),
-            ),
+            console.log("Could not open a browser. Open the URL above to finish signing in."),
           );
         });
       });
