@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.1.2
+
+- Keep `login` waiting for the callback when no browser can be opened, and print the URL to open instead of failing (#72).
+- On WSL, open the login URL in the Windows browser through `wslview` or PowerShell before falling back to `xdg-open`.
+
 ## 2.0.16
 
 - Use the official pinned Supermemory 5.0.1 SDK for hosted content, preserving namespace strings, batch IDs, metadata, search defaults, capture cadence, and permissions.
