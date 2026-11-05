@@ -80,6 +80,8 @@ export function stripJsoncComments(content: string): string {
     i++;
   }
 
-  // Remove trailing commas before } or ]
-  return result.replace(/,\s*([}\]])/g, "$1");
+  // Consume string spans first; JSON.parse still rejects unterminated strings.
+  return result.replace(/"(?:\\.|[^"\\])*"?|,\s*([}\]])/g, (match, closing: string | undefined) =>
+    closing ?? match,
+  );
 }
