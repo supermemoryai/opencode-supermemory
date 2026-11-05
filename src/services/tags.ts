@@ -80,7 +80,10 @@ function getGitEmail(directory: string): string | null {
   }
 }
 
-export function normalizeGitRemote(remoteUrl: string): string | null {
+export function normalizeGitRemote(
+  remoteUrl: string,
+  directory: string = process.cwd(),
+): string | null {
   const raw = remoteUrl.trim();
   if (!raw) return null;
 
@@ -102,7 +105,7 @@ export function normalizeGitRemote(remoteUrl: string): string | null {
     normalized =
       scpStyle?.[1] && scpStyle[2]
         ? `${scpStyle[1].toLowerCase()}/${scpStyle[2]}`
-        : `file:${resolve(raw)}`;
+        : `file:${resolve(directory, raw)}`;
   }
 
   return normalized
@@ -127,7 +130,7 @@ function getGitRepoInfo(directory: string): {
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     }).trim();
-    const normalizedRemote = normalizeGitRemote(remoteUrl);
+    const normalizedRemote = normalizeGitRemote(remoteUrl, directory);
     const displayRemote = remoteUrl.replace(/\/+$/, "").replace(/\.git$/i, "");
     const separator = Math.max(
       displayRemote.lastIndexOf("/"),
