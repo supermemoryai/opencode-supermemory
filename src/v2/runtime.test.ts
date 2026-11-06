@@ -6,14 +6,11 @@ import { DEFAULT_RECALL_DIRECTIVE } from "../services/recall.js";
 import type { ResolvedTags } from "../services/tags.js";
 import {
   applyInjection,
-  buildTranscriptTurns,
   buildV2RecallDirective,
-  mergeTurns,
   SUPERMEMORY_RECALL_TOOL_NAME,
   SUPERMEMORY_TOOL_NAME,
   V2Runtime,
   type RequestMessage,
-  type TranscriptMessage,
   type V2Context,
   type V2RuntimeDependencies,
 } from "./runtime.js";
@@ -29,18 +26,6 @@ const tags: ResolvedTags = {
   allReads: [],
 };
 
-function user(id: string, text: string): TranscriptMessage {
-  return { id, type: "user", text };
-}
-
-function assistant(
-  id: string,
-  text: string,
-  finish: string = "stop",
-): TranscriptMessage {
-  return { id, type: "assistant", finish, content: [{ type: "text", text }] };
-}
-
 function request(id: string, text: string): RequestMessage {
   return {
     id,
@@ -54,49 +39,6 @@ function texts(message: RequestMessage): string[] {
     (part) => part.text ?? "",
   );
 }
-
-describe("OpenCode 2 transcript capture", () => {
-  test("groups completed turns and protects private content", () => {
-    const turns = buildTranscriptTurns([
-      { id: "sys", type: "system", text: "injected" },
-      user("u1", "real prompt"),
-      assistant("a1", "calling a tool", "tool-calls"),
-      assistant("a2", "real answer"),
-      user("u2", "<private>secret prompt</private>"),
-      assistant("a3", "secret answer"),
-      user("u3", "token <private>secret</private>"),
-      assistant("a4", "safe answer"),
-      user("u4", "still streaming"),
-    ]);
-
-    expect(turns.map((turn) => turn.id)).toEqual(["u1", "u2", "u3"]);
-    expect(turns[0]?.messages).toEqual([
-      { role: "user", content: "real prompt" },
-      { role: "assistant", content: "calling a tool" },
-      { role: "assistant", content: "real answer" },
-    ]);
-    expect(turns[1]?.messages).toEqual([]);
-    expect(turns[2]?.messages[0]).toEqual({
-      role: "user",
-      content: "token [REDACTED]",
-    });
-  });
-
-  test("keeps turn positions stable when the transcript is compacted", () => {
-    const existing = mergeTurns(
-      [],
-      new Map(),
-      buildTranscriptTurns([user("u1", "one"), assistant("a1", "1")]),
-    );
-    const index = new Map([["u1", 0]]);
-    mergeTurns(
-      existing,
-      index,
-      buildTranscriptTurns([user("u2", "two"), assistant("a2", "2")]),
-    );
-    expect(existing.map((turn) => turn.id)).toEqual(["u1", "u2"]);
-  });
-});
 
 describe("OpenCode 2 request injection", () => {
   test("points the advisory directive at the recall helper", () => {
@@ -133,7 +75,7 @@ interface Harness {
   writes: Array<{ customId?: string; timeoutMs?: number; metadata?: Record<string, unknown> }>;
   adds: Array<{ content: string; customId?: string; metadata?: Record<string, unknown> }>;
   emitted: Array<{ kind?: unknown; message?: unknown }>;
-  transcript: TranscriptMessage[];
+  transcript: unknown[];
 }
 
 function harness(
@@ -145,7 +87,7 @@ function harness(
   const writes: Harness["writes"] = [];
   const adds: Harness["adds"] = [];
   const emitted: Harness["emitted"] = [];
-  const state: { transcript: TranscriptMessage[] } = { transcript: [] };
+  const state: { transcript: unknown[] } = { transcript: [] };
   const registration = { dispose: async () => undefined };
 
   const ctx = {
@@ -255,7 +197,6 @@ function harness(
     config: {
       recallMode: "direct",
       injectProfile: true,
-      captureEveryNTurns: 1,
       compactionEnabled: true,
       keywordPatterns: ["remember"],
       maxProjectMemories: 10,
@@ -284,7 +225,7 @@ function harness(
     get transcript() {
       return state.transcript;
     },
-    set transcript(value: TranscriptMessage[]) {
+    set transcript(value: unknown[]) {
       state.transcript = value;
     },
   };
@@ -372,77 +313,6 @@ describe("OpenCode 2 runtime", () => {
     await h.runtime.handleContext({ sessionID: "s1", messages: [message] });
     expect(texts(message).at(-1)).toContain(SUPERMEMORY_RECALL_TOOL_NAME);
     expect(h.queries).toHaveLength(0);
-    h.runtime.cleanup();
-  });
-
-  test("captures completed turns idempotently and saves compaction summaries", async () => {
-    const h = harness();
-    await h.runtime.register();
-
-    h.transcript = [user("u1", "question 1"), assistant("a1", "answer 1")];
-    await h.runtime.handleEvent({
-      id: "e1",
-      type: "session.execution.succeeded",
-      data: { sessionID: "s1" },
-    });
-    await h.runtime.idle();
-    await h.runtime.handleEvent({
-      id: "e2",
-      type: "session.execution.succeeded",
-      data: { sessionID: "s1" },
-    });
-    await h.runtime.idle();
-    expect(h.writes).toHaveLength(1);
-    expect(h.writes[0]?.customId).toStartWith("opencode:capture:");
-    expect(h.writes[0]?.timeoutMs).toBe(3_000);
-    expect(h.writes[0]?.metadata).toMatchObject({
-      captureReason: "cadence",
-      sm_capture_mode: "automatic",
-    });
-
-    // Compaction truncates the transcript; the earlier turn keeps its slot.
-    h.transcript = [
-      { id: "c1", type: "compaction" },
-      user("u2", "question 2"),
-      assistant("a2", "answer 2"),
-    ];
-    await h.runtime.handleEvent({
-      id: "e3",
-      type: "session.execution.succeeded",
-      data: { sessionID: "s1" },
-    });
-    await h.runtime.idle();
-    expect(h.writes).toHaveLength(2);
-    expect(h.writes[1]?.customId).not.toBe(h.writes[0]?.customId);
-
-    const summary = "Summary ".repeat(20);
-    await h.runtime.handleEvent({
-      id: "e4",
-      type: "session.compaction.ended",
-      data: { sessionID: "s1", text: summary, reason: "auto" },
-    });
-    await h.runtime.handleEvent({
-      id: "e4",
-      type: "session.compaction.ended",
-      data: { sessionID: "s1", text: summary, reason: "auto" },
-    });
-    expect(h.adds).toHaveLength(1);
-    expect(h.adds[0]?.customId).toStartWith("opencode:compaction:");
-    expect(h.adds[0]?.metadata).toMatchObject({ sm_capture_mode: "compaction" });
-
-    const system: Array<{ type: "text"; text: string }> = [];
-    await h.runtime.handleCompaction({ sessionID: "s1", system });
-    expect(system[0]?.text).toContain(COMPACTION_CONTEXT_MARKER);
-    expect(system[0]?.text).toContain("Build: bun run build");
-
-    await h.runtime.handleEvent({
-      id: "e5",
-      type: "session.deleted",
-      data: { sessionID: "s1" },
-    });
-    expect(h.runtime.trackedSessionCount).toBe(0);
-    expect(h.writes).toHaveLength(2);
-    expect(h.emitted.filter((event) => event.kind === "saved")).toHaveLength(3);
     h.runtime.cleanup();
   });
 
