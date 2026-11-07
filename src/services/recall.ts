@@ -136,9 +136,11 @@ export async function buildDirectRecallResult(options: {
   cache: RecallSessionCache;
   search: (query: string) => Promise<SearchResponse>;
   suppressTexts?: Iterable<string> | Promise<Iterable<string>>;
+  skipQuery?: (query: string) => boolean;
 }): Promise<DirectRecallResult> {
   try {
-    const query = prepareRecallQuery(options.prompt);
+    const prepared = prepareRecallQuery(options.prompt);
+    const query = prepared && options.skipQuery?.(prepared) ? null : prepared;
     // Begin the search before waiting for first-turn profile suppression. Both
     // reads have the same timeout, so a cold prompt pays one network window.
     const searchPromise = query

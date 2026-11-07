@@ -66,6 +66,45 @@ function getProjectBasePath(directory: string): string {
   return getGitRoot(directory) || resolve(directory);
 }
 
+const bareRepositoryCache = new Map<string, string | null>();
+
+// Linked worktrees of a bare repository have no main checkout, so they share the bare repository's identity.
+function getBareRepositoryPath(directory: string): string | null {
+  if (process.env.SUPERMEMORY_ISOLATE_WORKTREES === "true") return null;
+  const cached = bareRepositoryCache.get(directory);
+  if (cached !== undefined) return cached;
+  let result: string | null = null;
+  try {
+    const [commonDir, gitDir] = execSync(
+      "git rev-parse --path-format=absolute --git-common-dir --git-dir",
+      {
+        cwd: directory,
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
+      },
+    )
+      .trim()
+      .split(/\r?\n/);
+    if (commonDir && gitDir && commonDir !== gitDir) {
+      const bare = execSync("git config --bool core.bare", {
+        cwd: directory,
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
+      }).trim();
+      if (bare === "true") result = commonDir;
+    }
+  } catch {}
+  bareRepositoryCache.set(directory, result);
+  return result;
+}
+
+function getBareRepositoryName(bareRepositoryPath: string): string {
+  const name = basename(bareRepositoryPath).replace(/\.git$/i, "");
+  return name && !name.startsWith(".") ? name : basename(dirname(bareRepositoryPath));
+}
+
 function getGitEmail(directory: string): string | null {
   try {
     const email = execSync("git config user.email", {
@@ -259,9 +298,10 @@ export function getProjectIdentity(directory: string): string {
   const basePath = getProjectBasePath(directory);
   const { normalizedRemote } = getGitRepoInfo(basePath);
   const isolateWorktrees = process.env.SUPERMEMORY_ISOLATE_WORKTREES === "true";
-  let localIdentity = basePath;
+  const localPath = getBareRepositoryPath(basePath) ?? basePath;
+  let localIdentity = localPath;
   try {
-    localIdentity = realpathSync.native(basePath);
+    localIdentity = realpathSync.native(localPath);
   } catch {}
   return sha256(
     !isolateWorktrees && normalizedRemote
@@ -272,7 +312,11 @@ export function getProjectIdentity(directory: string): string {
 
 export function getGeneratedProjectTag(directory: string): string {
   const basePath = getProjectBasePath(directory);
-  const repoName = getGitRepoName(basePath) || basename(basePath) || "unknown";
+  const bareRepositoryPath = getBareRepositoryPath(basePath);
+  const repoName =
+    getGitRepoName(basePath) ||
+    (bareRepositoryPath ? getBareRepositoryName(bareRepositoryPath) : basename(basePath)) ||
+    "unknown";
   const shortName = sanitizeRepoName(repoName).slice(0, 72).replace(/_+$/g, "");
   return `repo_${shortName || "unknown"}__${getProjectIdentity(directory)}`;
 }

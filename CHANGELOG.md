@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Skip automatic recall, capture and compaction memory for subagent sessions (any session with a `parentID`) and, on OpenCode V1, for `opencode run` / `opencode github run`. Opt back in with `captureSubagents` / `captureHeadless` or `SUPERMEMORY_CAPTURE_SUBAGENTS=true` / `SUPERMEMORY_CAPTURE_HEADLESS=true`.
+- Treat Conductor and Vibe Kanban sessions as interactive; `captureOrchestrated: false` skips them.
+- Replace an opening prompt already captured from this machine for the same container with a one-line marker (`dedupeOpeningPrompt`), and skip recall for exact query repeats within 10 minutes (`dedupeRecallQueries`).
+- Linked worktrees of a bare repository without an origin remote now share the bare repository's container instead of getting one per worktree.
+
 ## 2.1.2
 
 - Keep `login` waiting for the callback when no browser can be opened, and print the URL to open instead of failing (#72).

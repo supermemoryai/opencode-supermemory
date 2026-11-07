@@ -5,6 +5,7 @@ import { CONFIG } from "../config.js";
 import type { ConversationMessage } from "../types/index.js";
 import { supermemoryClient } from "./client.js";
 import { AGENT_ENTITY_CONTEXT } from "./entity-context.js";
+import { OpeningPromptIndex } from "./local-dedupe.js";
 import { log } from "./logger.js";
 import { isFullyPrivate, stripPrivateContent } from "./privacy.js";
 import type { ResolvedTags } from "./tags.js";
@@ -67,6 +68,23 @@ export interface CaptureOptions {
   captureEveryNTurns?: number;
   memoryClient?: ConversationWriter;
   onSaved?: () => void;
+  openingPrompts?: OpeningPromptIndex | null;
+}
+
+export function defaultOpeningPromptIndex(): OpeningPromptIndex | null {
+  return CONFIG.dedupeOpeningPrompt ? new OpeningPromptIndex() : null;
+}
+
+/** Replaces an opening prompt this machine already captured for the tag with a marker. */
+export function prepareCaptureMessages(
+  index: OpeningPromptIndex | null,
+  containerTag: string,
+  sessionID: string,
+  batch: CaptureBatch,
+): { messages: ConversationMessage[]; commit: () => void } {
+  const messages = batch.turns.flatMap((turn) => turn.messages);
+  if (!index || batch.startTurn !== 1) return { messages, commit: () => {} };
+  return index.prepare(containerTag, sessionID, messages);
 }
 
 function extractText(parts: Part[] | undefined): string {
@@ -217,6 +235,10 @@ export function createCaptureHook(
   const captureEveryNTurns =
     options?.captureEveryNTurns ?? CONFIG.captureEveryNTurns;
   const memoryClient = options?.memoryClient ?? supermemoryClient;
+  const openingPrompts =
+    options?.openingPrompts !== undefined
+      ? options.openingPrompts
+      : defaultOpeningPromptIndex();
   const snapshots = new Map<string, CaptureTurn[]>();
   const activeSessions = new Set<string>();
   const completedCaptureIds = new Set<string>();
@@ -245,7 +267,12 @@ export function createCaptureHook(
     const captureId = getCaptureId(sessionID, batch);
     if (completedCaptureIds.has(captureId)) return true;
 
-    const messages = batch.turns.flatMap((turn) => turn.messages);
+    const { messages, commit } = prepareCaptureMessages(
+      openingPrompts,
+      tags.canonical,
+      sessionID,
+      batch,
+    );
     if (messages.length === 0) {
       completedCaptureIds.add(captureId);
       return true;
@@ -282,6 +309,7 @@ export function createCaptureHook(
 
     if (result.success) {
       completedCaptureIds.add(captureId);
+      commit();
       options?.onSaved?.();
       log("[capture] conversation batch saved", {
         sessionID,
