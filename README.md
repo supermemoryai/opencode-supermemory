@@ -326,9 +326,7 @@ shared repository container.
 The repository hash comes from the normalized Git `origin` remote, so Claude Code,
 Codex, Cursor, and OpenCode use the same container for the same repository.
 Repositories with the same name but different remotes remain isolated. Without an
-origin remote, OpenCode falls back to the repository's real filesystem path. Linked Git
-worktrees (including worktrees of a bare repository) use the main repository's path, so
-parallel worktrees share one container.
+origin remote, OpenCode falls back to the repository's real filesystem path.
 
 OpenCode also reads previous `user_project_*`, `repo_<project-name>`,
 `claudecode_project_*`, `codex_user_*`, `codex_project_*`, `opencode_user_*`,
