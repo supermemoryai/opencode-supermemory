@@ -13,7 +13,9 @@ import {
   AUTOMATIC_CAPTURE_TIMEOUT_MS,
   buildCadenceBatches,
   buildSessionEndBatch,
+  defaultOpeningPromptIndex,
   getCaptureId,
+  prepareCaptureMessages,
   type CaptureBatch,
   type CaptureTurn,
 } from "../services/capture.js";
@@ -47,6 +49,8 @@ import {
   type DirectRecallResult,
 } from "../services/recall.js";
 import { getTags, type ResolvedTags } from "../services/tags.js";
+import { OpeningPromptIndex, RecallQueryIndex } from "../services/local-dedupe.js";
+import { SessionScope, type SessionScopeConfig } from "../services/session-scope.js";
 import { checkNpmUpdate, type UpdateInfo } from "../services/version-check.js";
 import { SUPERMEMORY_RPC } from "../rpc.js";
 
@@ -122,7 +126,8 @@ type RuntimeConfig = Pick<
   | "compactionEnabled"
   | "keywordPatterns"
   | "maxProjectMemories"
->;
+> &
+  Partial<SessionScopeConfig>;
 
 export interface V2RuntimeDependencies {
   /** Auth state; a function is re-checked per hook so login/logout apply live. */
@@ -133,6 +138,8 @@ export interface V2RuntimeDependencies {
   resolveTags: typeof getTags;
   logger: typeof log;
   checkUpdate: () => Promise<UpdateInfo | null>;
+  openingPrompts: OpeningPromptIndex | null;
+  recallQueries: RecallQueryIndex | null;
 }
 
 const DEFAULT_DEPENDENCIES: V2RuntimeDependencies = {
@@ -144,6 +151,8 @@ const DEFAULT_DEPENDENCIES: V2RuntimeDependencies = {
   logger: log,
   checkUpdate: () =>
     checkNpmUpdate("opencode-supermemory", PLUGIN_VERSION, UPDATE_COMMAND),
+  openingPrompts: defaultOpeningPromptIndex(),
+  recallQueries: CONFIG.dedupeRecallQueries ? new RecallQueryIndex() : null,
 };
 
 /** Minimal shape of an OpenCode 2 event as read from `ctx.event.subscribe()`. */
@@ -445,6 +454,7 @@ export class V2Runtime {
   readonly #deduper = new EventDeduper();
   readonly #registrations: Registration[] = [];
   readonly #abortController = new AbortController();
+  readonly #scope: SessionScope;
   #emitActivity: ((notice: MemoryActivityNotice) => void) | undefined;
   #activity: MemoryActivityReporter;
   #active = true;
@@ -457,6 +467,13 @@ export class V2Runtime {
     this.#ctx = ctx;
     this.#deps = mergeDependencies(options);
     this.#isOwner = isOwner;
+    // OpenCode 2 gives plugins no per-session signal for `opencode run`, so only child sessions are detected here.
+    this.#scope = new SessionScope({
+      headless: false,
+      config: { ...CONFIG, ...this.#deps.config },
+      lookupParent: async (sessionID) =>
+        ((await ctx.session.get({ sessionID })) as { parentID?: string }).parentID,
+    });
     this.#activity = createMemoryActivityReporterFromSink((notice) => {
       this.#deps.logger("[activity]", { kind: notice.kind, message: notice.message });
       this.#emitActivity?.(notice);
@@ -661,6 +678,7 @@ export class V2Runtime {
     messages: RequestMessage[];
   }): Promise<void> {
     if (!this.#configured) return;
+    if (await this.#scope.skipReason(event.sessionID)) return;
     const latestUser = event.messages.findLast((message) => message.role === "user");
     if (!latestUser) return;
     const userText = extractMessageText(latestUser);
@@ -695,6 +713,7 @@ export class V2Runtime {
     system: Array<{ type: "text"; text: string }>;
   }): Promise<void> {
     if (!this.#configured || !this.#deps.config.compactionEnabled) return;
+    if (await this.#scope.skipReason(event.sessionID)) return;
     const memories = await this.#projectMemories(event.sessionID);
     event.system.push({ type: "text", text: createCompactionPrompt(memories) });
     this.#deps.logger("v2 compaction context injected", {
@@ -706,6 +725,13 @@ export class V2Runtime {
   async handleEvent(event: V2Event): Promise<void> {
     if (!this.active || !this.#configured || this.#deduper.hasSeen(event.id)) return;
     const sessionID = this.#eventSessionID(event);
+    if (sessionID && (await this.#scope.skipReason(sessionID))) {
+      if (event.type === "session.deleted") {
+        this.#states.delete(sessionID);
+        this.#scope.forget(sessionID);
+      }
+      return;
+    }
 
     if (sessionID && event.type !== "session.compaction.ended") {
       void this.#retryPendingSummaries(sessionID);
@@ -733,11 +759,15 @@ export class V2Runtime {
         if (!sessionID) return;
         const state = this.#states.get(sessionID);
         this.#recall.delete(sessionID);
-        if (!state) return;
+        if (!state) {
+          this.#scope.forget(sessionID);
+          return;
+        }
         await this.#runCaptureExclusive(sessionID, () =>
           this.#captureSessionEnd(sessionID),
         );
         this.#states.delete(sessionID);
+        this.#scope.forget(sessionID);
         return;
       }
 
@@ -946,6 +976,9 @@ export class V2Runtime {
                     : [],
                 )
               : undefined,
+            skipQuery: this.#deps.recallQueries
+              ? (query) => this.#deps.recallQueries?.isRepeat(tags.canonical, query) ?? false
+              : undefined,
           })
         : Promise.resolve(skipped);
 
@@ -1036,15 +1069,23 @@ export class V2Runtime {
   ): Promise<boolean> {
     const captureId = getCaptureId(sessionID, batch);
     if (state.completedCaptureIds.has(captureId)) return true;
-    const messages = batch.turns.flatMap((turn) => turn.messages);
-    if (messages.length === 0) {
+    if (batch.turns.every((turn) => turn.messages.length === 0)) {
       state.completedCaptureIds.add(captureId);
       return true;
     }
 
     let result: { success: boolean; error?: string };
+    let commit = () => {};
     try {
       const tags = await this.#resolveSession(sessionID);
+      const prepared = prepareCaptureMessages(
+        this.#deps.openingPrompts,
+        tags.canonical,
+        sessionID,
+        batch,
+      );
+      commit = prepared.commit;
+      const messages = prepared.messages;
       result = await this.#deps.memoryClient.ingestConversation(
         `${sessionID}:${batch.startTurn}-${batch.endTurn}`,
         messages,
@@ -1074,6 +1115,7 @@ export class V2Runtime {
 
     if (result.success) {
       state.completedCaptureIds.add(captureId);
+      commit();
       this.#activity.saved();
       this.#deps.logger("[capture] conversation batch saved", {
         sessionID,
@@ -1095,6 +1137,7 @@ export class V2Runtime {
   }
 
   async #captureCadence(sessionID: string): Promise<void> {
+    if (await this.#scope.skipReason(sessionID)) return;
     const state = this.#state(sessionID);
     const turns = await this.#refreshTurns(sessionID, state);
     for (const batch of buildCadenceBatches(
@@ -1106,6 +1149,7 @@ export class V2Runtime {
   }
 
   async #captureSessionEnd(sessionID: string): Promise<void> {
+    if (await this.#scope.skipReason(sessionID)) return;
     const state = this.#state(sessionID);
     const turns = await this.#refreshTurns(sessionID, state);
     for (const batch of buildCadenceBatches(

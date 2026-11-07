@@ -175,6 +175,45 @@ Completed conversations are captured automatically:
 - Synthetic plugin context is excluded and `<private>` content is redacted.
 - Stable capture IDs retain batch identity across repeated lifecycle events; they do not guarantee exactly-once processing or billing after an ambiguous response.
 
+### Sessions without automatic memory
+
+Automatic recall, capture and compaction memory run only for sessions you drive yourself.
+By default the plugin makes no Supermemory calls from its hooks for:
+
+- **Subagent sessions.** Any session with a `parentID`, which OpenCode sets on child sessions
+  spawned by the `task` (V1) or `subagent` (OpenCode 2) tool. Set `captureSubagents: true` or
+  `SUPERMEMORY_CAPTURE_SUBAGENTS=true` to restore recall and capture for them.
+- **Headless runs (OpenCode V1).** `opencode run` and `opencode github run`, which host the
+  server and plugins in the CLI process. Set `captureHeadless: true` or
+  `SUPERMEMORY_CAPTURE_HEADLESS=true` to restore them. OpenCode 2 gives plugins no signal for
+  `opencode run` (it may share the background server with interactive sessions), so headless
+  OpenCode 2 runs are still treated as interactive. `opencode run --attach` on V1 is the same.
+
+OpenCode's title generation never reaches the plugin's hooks, so it makes no Supermemory calls.
+Compaction only runs [Compaction Memory](#compaction-memory) for the session being summarised,
+which is skipped for subagent and headless sessions like everything else.
+
+Sessions started by Conductor (`CONDUCTOR_WORKSPACE_PATH`, `CONDUCTOR_SESSION_ID`) or Vibe Kanban
+(`VK_WORKSPACE_ID`) are real user work and always count as interactive, even through
+`opencode run`. Set `captureOrchestrated: false` or `SUPERMEMORY_CAPTURE_ORCHESTRATED=false` to
+skip them. Orchestrators without an environment variable (Crystal, Claude Squad) are not
+recognised. On OpenCode 2 the variables are read from the server process, so they only apply
+when it was started from the orchestrator's environment (for example `--standalone` or `run`
+without a background service).
+
+### Repeated prompts
+
+Swarms of one-shot workers often send the same task prompt many times. Two small local
+indexes under `~/.supermemory-opencode/` keep those repeats from being re-sent:
+
+- **Opening prompt** (`dedupeOpeningPrompt`, default `true`). When a session's first prompt
+  matches one this machine already captured for the same container tag, the capture is sent
+  with a one-line `[Opening prompt omitted: ...]` marker in its place. The rest of the
+  conversation is captured as usual. Set `SUPERMEMORY_DEDUPE_OPENING_PROMPT=false` to opt out.
+- **Recall query** (`dedupeRecallQueries`, default `true`). Direct recall is skipped when the
+  exact same normalized query was already searched against the same container tag in the last
+  10 minutes. Set `SUPERMEMORY_DEDUPE_RECALL_QUERIES=false` to opt out.
+
 ### Keyword Detection
 
 Say "remember", "save this", "don't forget" etc. and the agent auto-saves to memory.
@@ -309,6 +348,11 @@ does not require a migration.
 | `SUPERMEMORY_REPO_TAG` | Explicit project-container override, checked before the config value. |
 | `SUPERMEMORY_ISOLATE_WORKTREES` | Set to `true` to key the project container on the worktree path instead of the Git remote. |
 | `SUPERMEMORY_DEBUG` | Set to show `[recall-decision]` lines and enable debug logging. |
+| `SUPERMEMORY_CAPTURE_SUBAGENTS` | `true` restores recall and capture for subagent sessions (overrides `captureSubagents`). |
+| `SUPERMEMORY_CAPTURE_HEADLESS` | `true` restores recall and capture for `opencode run` (overrides `captureHeadless`). |
+| `SUPERMEMORY_CAPTURE_ORCHESTRATED` | `false` skips sessions started by Conductor or Vibe Kanban (overrides `captureOrchestrated`). |
+| `SUPERMEMORY_DEDUPE_OPENING_PROMPT` | `false` always sends repeated opening prompts (overrides `dedupeOpeningPrompt`). |
+| `SUPERMEMORY_DEDUPE_RECALL_QUERIES` | `false` always runs recall for repeated queries (overrides `dedupeRecallQueries`). |
 
 ### `~/.config/opencode/supermemory.jsonc`
 
@@ -390,6 +434,21 @@ scope, not from a different or malformed response.
 
   // Override the directive used in advisory mode
   "recallDirective": null,
+
+  // Recall and capture subagent (child) sessions too
+  "captureSubagents": false,
+
+  // OpenCode V1: recall and capture `opencode run` / `opencode github run` too
+  "captureHeadless": false,
+
+  // Recall and capture sessions started by Conductor or Vibe Kanban
+  "captureOrchestrated": true,
+
+  // Replace an opening prompt already captured from this machine with a marker
+  "dedupeOpeningPrompt": true,
+
+  // Skip recall for an exact repeat of a query made in the last 10 minutes
+  "dedupeRecallQueries": true,
 }
 ```
 
