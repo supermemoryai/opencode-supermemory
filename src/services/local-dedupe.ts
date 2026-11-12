@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 import type { ConversationMessage } from "../types/index.js";
+import type { SearchResponse } from "./client.js";
 
 const STATE_DIR = join(homedir(), ".supermemory-opencode");
 export const OPENING_PROMPTS_FILE = join(STATE_DIR, "opening-prompts.json");
@@ -11,6 +12,8 @@ export const RECALL_QUERIES_FILE = join(STATE_DIR, "recall-queries.json");
 const MAX_OPENING_PROMPTS = 1_000;
 const MAX_RECALL_QUERIES = 500;
 export const RECALL_REPEAT_WINDOW_MS = 10 * 60 * 1000;
+export const OPENING_PROMPT_MIN_CHARS = 200;
+export const OPENING_PROMPT_TTL_MS = 24 * 60 * 60 * 1000;
 
 type Entries<T> = Record<string, T>;
 
@@ -45,11 +48,14 @@ function newest<T>(entries: Entries<T>, limit: number, at: (value: T) => number)
 }
 
 /**
- * Remembers which session first captured each opening prompt per container tag,
- * so repeated one-shot workers do not re-send the same task prompt.
+ * Remembers which session first captured each long opening prompt per container
+ * tag in the last 24 hours, so repeated one-shot workers do not re-send it.
  */
 export class OpeningPromptIndex {
-  constructor(private readonly file = OPENING_PROMPTS_FILE) {}
+  constructor(
+    private readonly file = OPENING_PROMPTS_FILE,
+    private readonly now: () => number = Date.now,
+  ) {}
 
   /** Returns the batch to send and a commit to call once the capture is accepted. */
   prepare(
@@ -63,9 +69,12 @@ export class OpeningPromptIndex {
       return unchanged;
     }
 
+    const prompt = opening.content.replace(/\s+/g, " ").trim();
+    if (prompt.length < OPENING_PROMPT_MIN_CHARS) return unchanged;
+
     try {
-      const hash = sha256(`${containerTag}\n${opening.content.replace(/\s+/g, " ").trim()}`);
-      const owner = readEntries<{ sessionId: string; at: number }>(this.file)[hash];
+      const hash = sha256(`${containerTag}\n${prompt}`);
+      const owner = this.#fresh()[hash];
       if (owner && owner.sessionId !== sessionID) {
         return {
           messages: [
@@ -83,8 +92,8 @@ export class OpeningPromptIndex {
         messages,
         commit: () => {
           try {
-            const entries = readEntries<{ sessionId: string; at: number }>(this.file);
-            entries[hash] ??= { sessionId: sessionID, at: Date.now() };
+            const entries = this.#fresh();
+            entries[hash] ??= { sessionId: sessionID, at: this.now() };
             writeEntries(this.file, newest(entries, MAX_OPENING_PROMPTS, (entry) => entry.at));
           } catch {}
         },
@@ -93,29 +102,58 @@ export class OpeningPromptIndex {
       return unchanged;
     }
   }
+
+  #fresh(): Entries<{ sessionId: string; at: number }> {
+    const now = this.now();
+    return Object.fromEntries(
+      Object.entries(readEntries<{ sessionId: string; at: number }>(this.file)).filter(
+        ([, entry]) =>
+          typeof entry?.at === "number" &&
+          typeof entry.sessionId === "string" &&
+          now - entry.at < OPENING_PROMPT_TTL_MS,
+      ),
+    );
+  }
 }
 
-/** Exact repeats of a normalized recall query against one container tag within the window. */
-export class RecallQueryIndex {
+/** Re-serves the last successful recall search for a normalized query against one container tag within the window. */
+export class RecallQueryCache {
   constructor(
     private readonly file = RECALL_QUERIES_FILE,
     private readonly windowMs = RECALL_REPEAT_WINDOW_MS,
+    private readonly now: () => number = Date.now,
   ) {}
 
-  isRepeat(containerTag: string, query: string, now = Date.now()): boolean {
-    try {
+  wrap(
+    containerTag: string,
+    search: (query: string) => Promise<SearchResponse>,
+  ): (query: string) => Promise<SearchResponse> {
+    return async (query) => {
       const hash = sha256(`${containerTag}\n${query.toLowerCase().replace(/\s+/g, " ").trim()}`);
-      const entries = Object.fromEntries(
-        Object.entries(readEntries<number>(this.file)).filter(
-          ([, at]) => typeof at === "number" && now - at < this.windowMs,
-        ),
-      );
-      if (entries[hash] !== undefined) return true;
-      entries[hash] = now;
-      writeEntries(this.file, newest(entries, MAX_RECALL_QUERIES, (at) => at));
-      return false;
-    } catch {
-      return false;
-    }
+      const cached = this.#fresh()[hash];
+      if (cached) return cached.response;
+
+      const response = await search(query);
+      if (response.success) {
+        try {
+          const entries = this.#fresh();
+          entries[hash] = { at: this.now(), response };
+          writeEntries(this.file, newest(entries, MAX_RECALL_QUERIES, (entry) => entry.at));
+        } catch {}
+      }
+      return response;
+    };
+  }
+
+  #fresh(): Entries<{ at: number; response: SearchResponse }> {
+    const now = this.now();
+    return Object.fromEntries(
+      Object.entries(readEntries<{ at: number; response: SearchResponse }>(this.file)).filter(
+        ([, entry]) =>
+          typeof entry?.at === "number" &&
+          entry.response?.success === true &&
+          now - entry.at < this.windowMs,
+      ),
+    );
   }
 }

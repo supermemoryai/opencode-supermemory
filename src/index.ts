@@ -25,7 +25,7 @@ import {
 } from "./services/memory-tool.js";
 import { getTags } from "./services/tags.js";
 import { isHeadlessCommand, SessionScope } from "./services/session-scope.js";
-import { RecallQueryIndex } from "./services/local-dedupe.js";
+import { RecallQueryCache } from "./services/local-dedupe.js";
 import { createCompactionHook, type CompactionContext } from "./services/compaction.js";
 
 import { isConfigured, CONFIG, PLUGIN_VERSION } from "./config.js";
@@ -109,7 +109,17 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
       return response.data.parentID;
     },
   });
-  const recallQueries = CONFIG.dedupeRecallQueries ? new RecallQueryIndex() : null;
+  const searchForRecall = (query: string) =>
+    supermemoryClient.searchMemoriesForRecall(
+      query,
+      tags.canonical,
+      tags.personalReads,
+      tags.projectReads,
+      { timeoutMs: DIRECT_RECALL_TIMEOUT_MS },
+    );
+  const recallSearch = CONFIG.dedupeRecallQueries
+    ? new RecallQueryCache().wrap(tags.canonical, searchForRecall)
+    : searchForRecall;
   log("Plugin init", { directory, tags, configured: isConfigured() });
 
   if (!isConfigured()) {
@@ -228,23 +238,13 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
                 prompt: userMessage,
                 sessionID: input.sessionID,
                 cache: recallSessions,
-                search: (query) =>
-                  supermemoryClient.searchMemoriesForRecall(
-                    query,
-                    tags.canonical,
-                    tags.personalReads,
-                    tags.projectReads,
-                    { timeoutMs: DIRECT_RECALL_TIMEOUT_MS },
-                  ),
+                search: recallSearch,
                 suppressTexts: isFirstMessage
                   ? profileRequest.then((result) =>
                       result?.success && result.profile
                         ? getInjectedProfileFactTexts(result)
                         : [],
                     )
-                  : undefined,
-                skipQuery: recallQueries
-                  ? (query) => recallQueries.isRepeat(tags.canonical, query)
                   : undefined,
               })
             : Promise.resolve({
