@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -35,8 +35,12 @@ function readEntries<T>(file: string): Entries<T> {
 function writeEntries<T>(file: string, entries: Entries<T>): void {
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
   const temporary = `${file}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
-  writeFileSync(temporary, JSON.stringify(entries), { mode: 0o600 });
-  renameSync(temporary, file);
+  try {
+    writeFileSync(temporary, JSON.stringify(entries), { mode: 0o600, flag: "wx" });
+    renameSync(temporary, file);
+  } finally {
+    rmSync(temporary, { force: true });
+  }
 }
 
 function newest<T>(entries: Entries<T>, limit: number, at: (value: T) => number): Entries<T> {
@@ -116,20 +120,25 @@ export class OpeningPromptIndex {
   }
 }
 
-/** Re-serves the last successful recall search for a normalized query against one container tag within the window. */
+/** Re-serves the last successful recall search per backend, credential, container tags and normalized query within the window. */
 export class RecallQueryCache {
   constructor(
+    private readonly scope: () => string | null,
     private readonly file = RECALL_QUERIES_FILE,
     private readonly windowMs = RECALL_REPEAT_WINDOW_MS,
     private readonly now: () => number = Date.now,
   ) {}
 
   wrap(
-    containerTag: string,
+    containerTags: readonly string[],
     search: (query: string) => Promise<SearchResponse>,
   ): (query: string) => Promise<SearchResponse> {
     return async (query) => {
-      const hash = sha256(`${containerTag}\n${query.toLowerCase().replace(/\s+/g, " ").trim()}`);
+      const scope = this.scope();
+      if (!scope) return search(query);
+      const hash = sha256(
+        [scope, ...containerTags, query.toLowerCase().replace(/\s+/g, " ").trim()].join("\n"),
+      );
       const cached = this.#fresh()[hash];
       if (cached) return cached.response;
 

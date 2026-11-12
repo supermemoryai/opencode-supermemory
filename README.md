@@ -220,8 +220,10 @@ indexes under `~/.supermemory-opencode/` keep those repeats from being re-sent:
 - **Recall query** (`dedupeRecallQueries`, default `true`). When the same normalized query is
   recalled against the same container tag within 10 minutes, the result of the first successful
   search is re-served without another API call, so a new session still gets the same context. A
-  failed or timed-out search is never cached. Set `SUPERMEMORY_DEDUPE_RECALL_QUERIES=false` to
-  opt out.
+  failed or timed-out search is never cached. Entries are keyed on a hash of the API base URL,
+  the credential, the container tags and the query, so another account or backend never reuses
+  them; nothing is cached without a credential, and `logout` deletes the file. Set
+  `SUPERMEMORY_DEDUPE_RECALL_QUERIES=false` to opt out.
 
 The `SUPERMEMORY_CAPTURE_*` and `SUPERMEMORY_DEDUPE_*` variables accept `true`/`1`/`yes`/`on`
 and `false`/`0`/`no`/`off` (any case) and override the config file in both directions.

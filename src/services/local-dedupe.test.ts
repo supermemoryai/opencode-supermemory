@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -60,9 +60,11 @@ describe("local dedupe indexes", () => {
     expect(index.prepare("repo_a", "worker-2", batch).messages).toEqual(batch);
   });
 
-  test("re-serves a successful recall search per tag within the window and retries failures", async () => {
+  test("re-serves a successful recall search per credential and tags within the window and retries failures", async () => {
     let now = 0;
-    const cache = new RecallQueryCache(tempFile("recall.json"), 1_000, () => now);
+    let scope: string | null = "backend-a:key-1";
+    const file = tempFile("recall.json");
+    const cache = new RecallQueryCache(() => scope, file, 1_000, () => now);
     const calls: string[] = [];
     let fail = false;
     const search = async (query: string): Promise<SearchResponse> => {
@@ -71,13 +73,14 @@ describe("local dedupe indexes", () => {
         ? { success: false, error: "unavailable" }
         : { success: true, results: [{ id: `m${calls.length}`, memory: "deploy with wrangler" }] };
     };
-    const repoA = cache.wrap("repo_a", search);
+    const repoA = cache.wrap(["repo_a", "user_a"], search);
 
     const first = await repoA("How do we deploy?");
     now = 500;
     expect(await repoA("how do  we deploy?")).toEqual(first);
     expect(calls).toHaveLength(1);
-    await cache.wrap("repo_b", search)("How do we deploy?");
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    await cache.wrap(["repo_b", "user_a"], search)("How do we deploy?");
     await repoA("How do we deploy to prod?");
     expect(calls).toHaveLength(3);
     now = 1_500;
@@ -89,5 +92,16 @@ describe("local dedupe indexes", () => {
     fail = false;
     expect((await repoA("What is pending?")).success).toBe(true);
     expect(calls).toHaveLength(6);
+
+    scope = "backend-a:key-2";
+    await repoA("What is pending?");
+    expect(calls).toHaveLength(7);
+    scope = "backend-a:key-1";
+    await repoA("What is pending?");
+    expect(calls).toHaveLength(7);
+    scope = null;
+    await repoA("What is pending?");
+    await repoA("What is pending?");
+    expect(calls).toHaveLength(9);
   });
 });
