@@ -122,9 +122,9 @@ function validateCaptureEveryNTurns(
 }
 
 function resolveFlag(envName: string, value: unknown, fallback: boolean): boolean {
-  const env = process.env[envName]?.trim().toLowerCase();
-  if (env === "true" || env === "1") return true;
-  if (env === "false" || env === "0") return false;
+  const env = process.env[envName]?.trim().toLowerCase() ?? "";
+  if (["true", "1", "yes", "on"].includes(env)) return true;
+  if (["false", "0", "no", "off"].includes(env)) return false;
   return typeof value === "boolean" ? value : fallback;
 }
 
