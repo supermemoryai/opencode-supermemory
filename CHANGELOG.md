@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.2.0
 
 - Skip automatic recall, capture and compaction memory for subagent sessions (any session with a `parentID`) and, on OpenCode V1, for `opencode run` / `opencode github run`. Opt back in with `captureSubagents` / `captureHeadless` or `SUPERMEMORY_CAPTURE_SUBAGENTS=true` / `SUPERMEMORY_CAPTURE_HEADLESS=true`.
 - Treat Conductor and Vibe Kanban sessions as interactive; `captureOrchestrated: false` skips them.
