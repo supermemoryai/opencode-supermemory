@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type Server } from "node:http";
+import { OPENING_PROMPTS_FILE, RECALL_QUERIES_FILE } from "./local-dedupe.js";
 import { openUrl } from "./openUrl.js";
 import { PLUGIN_VERSION } from "../version.js";
 
@@ -460,6 +461,8 @@ export async function settleAuth(): Promise<void> {
 
 export async function clearCredentials(): Promise<Credentials | null> {
   return withAuthLock(async (remaining) => {
+    fs.rmSync(RECALL_QUERIES_FILE, { force: true });
+    fs.rmSync(OPENING_PROMPTS_FILE, { force: true });
     const credentials = loadCredentialData();
     if (credentials?.type === "oauth" && credentials.refreshToken) {
       await oauthRequest(issuerEndpoint(credentials.revocationEndpoint, credentials.issuer), {

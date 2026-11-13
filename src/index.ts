@@ -24,9 +24,11 @@ import {
   type SupermemoryToolArgs,
 } from "./services/memory-tool.js";
 import { getTags } from "./services/tags.js";
+import { isHeadlessCommand, SessionScope } from "./services/session-scope.js";
+import { RecallQueryCache } from "./services/local-dedupe.js";
 import { createCompactionHook, type CompactionContext } from "./services/compaction.js";
 
-import { isConfigured, CONFIG, PLUGIN_VERSION } from "./config.js";
+import { isConfigured, CONFIG, getDedupeScope, PLUGIN_VERSION } from "./config.js";
 import { log } from "./services/logger.js";
 import { checkNpmUpdate } from "./services/version-check.js";
 
@@ -53,6 +55,22 @@ function removeCodeBlocks(text: string): string {
 function detectMemoryKeyword(text: string): boolean {
   const textWithoutCode = removeCodeBlocks(text);
   return MEMORY_KEYWORD_PATTERN.test(textWithoutCode);
+}
+
+function eventSessionID(event: { type: string; properties?: unknown }): string | undefined {
+  const props = event.properties as
+    | {
+        sessionID?: unknown;
+        info?: { id?: unknown; sessionID?: unknown };
+        part?: { sessionID?: unknown };
+      }
+    | undefined;
+  const id =
+    props?.sessionID ??
+    props?.info?.sessionID ??
+    props?.part?.sessionID ??
+    (event.type.startsWith("session.") ? props?.info?.id : undefined);
+  return typeof id === "string" && id ? id : undefined;
 }
 
 function isSupermemoryRecallSearch(input: Permission): boolean {
@@ -83,6 +101,28 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
   const injectedSessions = new Set<string>();
   const recallSessions = new RecallSessionCache();
   const activity = createMemoryActivityReporter(ctx.client);
+  const scope = new SessionScope({
+    headless: isHeadlessCommand(),
+    lookupParent: async (id) => {
+      const response = await ctx.client.session.get({ path: { id } });
+      if (!response.data) throw new Error(`Unable to read OpenCode session ${id}`);
+      return response.data.parentID;
+    },
+  });
+  const searchForRecall = (query: string) =>
+    supermemoryClient.searchMemoriesForRecall(
+      query,
+      tags.canonical,
+      tags.personalReads,
+      tags.projectReads,
+      { timeoutMs: DIRECT_RECALL_TIMEOUT_MS },
+    );
+  const recallSearch = CONFIG.dedupeRecallQueries
+    ? new RecallQueryCache(getDedupeScope).wrap(
+        [tags.canonical, ...tags.personalReads, ...tags.projectReads],
+        searchForRecall,
+      )
+    : searchForRecall;
   log("Plugin init", { directory, tags, configured: isConfigured() });
 
   if (!isConfigured()) {
@@ -130,6 +170,7 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
   return {
     "chat.message": async (input, output) => {
       if (!isConfigured()) return;
+      if (await scope.skipReason(input.sessionID)) return;
 
       const start = Date.now();
 
@@ -200,14 +241,7 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
                 prompt: userMessage,
                 sessionID: input.sessionID,
                 cache: recallSessions,
-                search: (query) =>
-                  supermemoryClient.searchMemoriesForRecall(
-                    query,
-                    tags.canonical,
-                    tags.personalReads,
-                    tags.projectReads,
-                    { timeoutMs: DIRECT_RECALL_TIMEOUT_MS },
-                  ),
+                search: recallSearch,
                 suppressTexts: isFirstMessage
                   ? profileRequest.then((result) =>
                       result?.success && result.profile
@@ -359,6 +393,10 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
 
     event: async (input: { event: { type: string; properties?: unknown } }) => {
       const props = input.event.properties as Record<string, unknown> | undefined;
+      if (input.event.type === "session.created" || input.event.type === "session.updated") {
+        const info = props?.info as { id?: string; parentID?: string } | undefined;
+        scope.note(info?.id, info?.parentID);
+      }
       if (input.event.type === "session.deleted") {
         const sessionID = (props?.info as { id?: string } | undefined)?.id;
         if (sessionID) {
@@ -371,6 +409,10 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
       }
 
       if (!isConfigured()) return;
+      const sessionID = eventSessionID(input.event);
+      const skip = sessionID ? await scope.skipReason(sessionID) : scope.processSkipReason;
+      if (sessionID && input.event.type === "session.deleted") scope.forget(sessionID);
+      if (skip) return;
       if (compactionHook) {
         await compactionHook.event(input);
       }
