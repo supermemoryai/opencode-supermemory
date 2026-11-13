@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -122,9 +123,9 @@ function validateCaptureEveryNTurns(
 }
 
 function resolveFlag(envName: string, value: unknown, fallback: boolean): boolean {
-  const env = process.env[envName]?.trim().toLowerCase();
-  if (env === "true" || env === "1") return true;
-  if (env === "false" || env === "0") return false;
+  const env = process.env[envName]?.trim().toLowerCase() ?? "";
+  if (["true", "1", "yes", "on"].includes(env)) return true;
+  if (["false", "0", "no", "off"].includes(env)) return false;
   return typeof value === "boolean" ? value : fallback;
 }
 
@@ -164,6 +165,20 @@ export function getApiKey(): string | undefined {
   if (process.env.SUPERMEMORY_API_KEY) return process.env.SUPERMEMORY_API_KEY;
   if (fileConfig.apiKey) return fileConfig.apiKey;
   return loadCredentials();
+}
+
+/** Hash of the backend URL and credential that scopes local recall caching; null without a credential. */
+export function getRecallCacheScope(): string | null {
+  try {
+    const apiKey = getApiKey();
+    const saved = apiKey ? null : loadCredentialData();
+    const credential =
+      apiKey ?? (saved?.type === "oauth" ? (saved.refreshToken ?? saved.accessToken) : undefined);
+    if (!credential) return null;
+    return createHash("sha256").update(`${getApiBaseUrl()}\n${credential}`).digest("hex");
+  } catch {
+    return null;
+  }
 }
 
 function normalizeBaseUrl(baseUrl: unknown): string | null {

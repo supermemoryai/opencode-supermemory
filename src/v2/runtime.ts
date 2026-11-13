@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import type { Plugin } from "@opencode/plugin";
 import type { SessionHooks } from "@opencode/plugin/promise/session";
 
-import { CONFIG, isConfigured, PLUGIN_VERSION } from "../config.js";
+import { CONFIG, getRecallCacheScope, isConfigured, PLUGIN_VERSION } from "../config.js";
 import {
   createMemoryActivityReporterFromSink,
   type MemoryActivityNotice,
@@ -49,7 +49,7 @@ import {
   type DirectRecallResult,
 } from "../services/recall.js";
 import { getTags, type ResolvedTags } from "../services/tags.js";
-import { OpeningPromptIndex, RecallQueryIndex } from "../services/local-dedupe.js";
+import { OpeningPromptIndex, RecallQueryCache } from "../services/local-dedupe.js";
 import { SessionScope, type SessionScopeConfig } from "../services/session-scope.js";
 import { checkNpmUpdate, type UpdateInfo } from "../services/version-check.js";
 import { SUPERMEMORY_RPC } from "../rpc.js";
@@ -139,7 +139,7 @@ export interface V2RuntimeDependencies {
   logger: typeof log;
   checkUpdate: () => Promise<UpdateInfo | null>;
   openingPrompts: OpeningPromptIndex | null;
-  recallQueries: RecallQueryIndex | null;
+  recallQueries: RecallQueryCache | null;
 }
 
 const DEFAULT_DEPENDENCIES: V2RuntimeDependencies = {
@@ -152,7 +152,7 @@ const DEFAULT_DEPENDENCIES: V2RuntimeDependencies = {
   checkUpdate: () =>
     checkNpmUpdate("opencode-supermemory", PLUGIN_VERSION, UPDATE_COMMAND),
   openingPrompts: defaultOpeningPromptIndex(),
-  recallQueries: CONFIG.dedupeRecallQueries ? new RecallQueryIndex() : null,
+  recallQueries: CONFIG.dedupeRecallQueries ? new RecallQueryCache(getRecallCacheScope) : null,
 };
 
 /** Minimal shape of an OpenCode 2 event as read from `ctx.event.subscribe()`. */
@@ -955,29 +955,32 @@ export class V2Runtime {
       count: 0,
       tokens: 0,
     };
+    const searchForRecall = (query: string) =>
+      memoryClient.searchMemoriesForRecall(
+        query,
+        tags.canonical,
+        tags.personalReads,
+        tags.projectReads,
+        { timeoutMs: DIRECT_RECALL_TIMEOUT_MS },
+      );
     const directRecall =
       config.recallMode === "direct"
         ? buildDirectRecallResult({
             prompt: userText,
             sessionID,
             cache: this.#recall,
-            search: (query) =>
-              memoryClient.searchMemoriesForRecall(
-                query,
-                tags.canonical,
-                tags.personalReads,
-                tags.projectReads,
-                { timeoutMs: DIRECT_RECALL_TIMEOUT_MS },
-              ),
+            search: this.#deps.recallQueries
+              ? this.#deps.recallQueries.wrap(
+                  [tags.canonical, ...tags.personalReads, ...tags.projectReads],
+                  searchForRecall,
+                )
+              : searchForRecall,
             suppressTexts: isFirstMessage
               ? profileRequest.then((result) =>
                   result?.success && result.profile
                     ? getInjectedProfileFactTexts(result)
                     : [],
                 )
-              : undefined,
-            skipQuery: this.#deps.recallQueries
-              ? (query) => this.#deps.recallQueries?.isRepeat(tags.canonical, query) ?? false
               : undefined,
           })
         : Promise.resolve(skipped);

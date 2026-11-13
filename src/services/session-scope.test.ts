@@ -24,6 +24,12 @@ describe("session scope", () => {
     expect(isHeadlessCommand(argv("./project"))).toBe(false);
     expect(isHeadlessCommand(argv("serve"))).toBe(false);
     expect(isHeadlessCommand(argv("github", "install"))).toBe(false);
+    expect(isHeadlessCommand(argv("--port", "4096", "run", "x"))).toBe(true);
+    expect(isHeadlessCommand(argv("-m", "p/m", "run", "x"))).toBe(true);
+    expect(isHeadlessCommand(argv("--prompt", "run"))).toBe(false);
+    expect(isHeadlessCommand(argv("--agent", "run"))).toBe(false);
+    expect(isHeadlessCommand(argv("-s", "run"))).toBe(false);
+    expect(isHeadlessCommand(argv("--port", "4096"))).toBe(false);
   });
 
   test("orchestrated sessions count as interactive unless opted out", () => {
@@ -67,5 +73,22 @@ describe("session scope", () => {
       env: {},
     });
     expect(await optedIn.skipReason("child")).toBeNull();
+  });
+
+  test("treats a hung parent lookup as a root session and retries it later", async () => {
+    let calls = 0;
+    const scope = new SessionScope({
+      lookupParent: (id) => {
+        calls += 1;
+        return calls === 1 ? new Promise<string | undefined>(() => {}) : Promise.resolve(id);
+      },
+      headless: false,
+      config: defaults,
+      env: {},
+      lookupTimeoutMs: 20,
+    });
+    expect(await scope.skipReason("slow")).toBeNull();
+    expect(await scope.skipReason("slow")).toBe("subagent");
+    expect(calls).toBe(2);
   });
 });

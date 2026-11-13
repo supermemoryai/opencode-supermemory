@@ -16,6 +16,24 @@ const ORCHESTRATOR_ENV_VARS = [
   "VK_WORKSPACE_ID",
 ] as const;
 
+// Global and default-command flags of opencode V1 (1.19) that take a value.
+const VALUE_FLAGS = new Set([
+  "--log-level",
+  "--port",
+  "--hostname",
+  "--mdns-domain",
+  "--cors",
+  "-m",
+  "--model",
+  "-s",
+  "--session",
+  "--prompt",
+  "--agent",
+  "--replay-limit",
+]);
+
+export const PARENT_LOOKUP_TIMEOUT_MS = 2_000;
+
 export function isOrchestrated(env: NodeJS.ProcessEnv = process.env): boolean {
   return ORCHESTRATOR_ENV_VARS.some((name) => Boolean(env[name]?.trim()));
 }
@@ -30,7 +48,7 @@ export function isHeadlessCommand(argv: readonly string[] = process.argv): boole
   for (let index = 0; index < args.length && positionals.length < 2; index += 1) {
     const arg = args[index] ?? "";
     if (arg === "--") break;
-    if (arg === "--log-level") {
+    if (VALUE_FLAGS.has(arg)) {
       index += 1;
       continue;
     }
@@ -62,6 +80,7 @@ export class SessionScope {
   readonly #config: SessionScopeConfig;
   readonly #processReason: SessionSkipReason | null;
   readonly #lookupParent: (sessionID: string) => Promise<string | undefined>;
+  readonly #lookupTimeoutMs: number;
   readonly #children = new Map<string, Promise<boolean>>();
   readonly #logged = new Set<string>();
 
@@ -70,9 +89,11 @@ export class SessionScope {
     headless: boolean;
     config?: SessionScopeConfig;
     env?: NodeJS.ProcessEnv;
+    lookupTimeoutMs?: number;
   }) {
     this.#config = options.config ?? CONFIG;
     this.#lookupParent = options.lookupParent;
+    this.#lookupTimeoutMs = options.lookupTimeoutMs ?? PARENT_LOOKUP_TIMEOUT_MS;
     this.#processReason = getProcessSkipReason({
       config: this.#config,
       headless: options.headless,
@@ -104,13 +125,24 @@ export class SessionScope {
 
     let isChild = this.#children.get(sessionID);
     if (!isChild) {
-      isChild = this.#lookupParent(sessionID).then(
-        (parentID) => Boolean(parentID),
-        () => {
-          this.#children.delete(sessionID);
-          return false;
-        },
-      );
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      isChild = Promise.race([
+        Promise.resolve().then(() => this.#lookupParent(sessionID)),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error("OpenCode session lookup timed out")),
+            this.#lookupTimeoutMs,
+          );
+        }),
+      ])
+        .finally(() => clearTimeout(timer))
+        .then(
+          (parentID) => Boolean(parentID),
+          () => {
+            this.#children.delete(sessionID);
+            return false;
+          },
+        );
       this.#children.set(sessionID, isChild);
     }
     if (!(await isChild)) return null;
