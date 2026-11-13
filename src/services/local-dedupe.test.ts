@@ -14,8 +14,10 @@ const TASK =
   "Run the nightly migration task against the staging database, verify every table row count matches the snapshot taken before the run, then write a short report with any mismatches and the exact SQL you used.";
 
 describe("local dedupe indexes", () => {
-  test("sends a long opening prompt once per container tag and keeps the owner session intact", () => {
-    const index = new OpeningPromptIndex(tempFile("opening.json"));
+  test("sends a long opening prompt once per credential and container tag and keeps the owner session intact", () => {
+    let scope: string | null = "backend-a:key-1";
+    const file = tempFile("opening.json");
+    const index = new OpeningPromptIndex(() => scope, file);
     const batch = [
       { role: "user" as const, content: TASK },
       { role: "assistant" as const, content: "Done." },
@@ -33,11 +35,21 @@ describe("local dedupe indexes", () => {
     expect(repeat.messages[0]?.content).toMatch(/^\[Opening prompt omitted: .*sha256:[0-9a-f]{12}\)\]$/);
     expect(repeat.messages[1]).toEqual({ role: "assistant", content: "Done again." });
     expect(index.prepare("repo_b", "worker-3", batch).messages).toEqual(batch);
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+
+    scope = "backend-b:key-1";
+    expect(index.prepare("repo_a", "worker-4", batch).messages).toEqual(batch);
+    scope = null;
+    const anonymous = index.prepare("repo_a", "worker-5", batch);
+    expect(anonymous.messages).toEqual(batch);
+    anonymous.commit();
+    scope = "backend-a:key-1";
+    expect(index.prepare("repo_a", "worker-6", batch).messages).not.toEqual(batch);
   });
 
   test("leaves short opening prompts and prompts captured over 24 hours ago untouched", () => {
     let now = 0;
-    const index = new OpeningPromptIndex(tempFile("opening.json"), () => now);
+    const index = new OpeningPromptIndex(() => "backend-a:key-1", tempFile("opening.json"), () => now);
     const short = [{ role: "user" as const, content: "fix the failing tests" }];
     index.prepare("repo_a", "worker-1", short).commit();
     expect(index.prepare("repo_a", "worker-2", short).messages).toEqual(short);
@@ -54,7 +66,7 @@ describe("local dedupe indexes", () => {
   });
 
   test("an uncommitted capture does not mark the prompt as sent", () => {
-    const index = new OpeningPromptIndex(tempFile("opening.json"));
+    const index = new OpeningPromptIndex(() => "backend-a:key-1", tempFile("opening.json"));
     const batch = [{ role: "user" as const, content: TASK }];
     index.prepare("repo_a", "worker-1", batch);
     expect(index.prepare("repo_a", "worker-2", batch).messages).toEqual(batch);

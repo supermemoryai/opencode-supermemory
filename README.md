@@ -212,11 +212,12 @@ Swarms of one-shot workers often send the same task prompt many times. Two small
 indexes under `~/.supermemory-opencode/` keep those repeats from being re-sent:
 
 - **Opening prompt** (`dedupeOpeningPrompt`, default `true`). When a session's first prompt is
-  at least 200 characters and matches one this machine successfully captured for the same
-  container tag in the last 24 hours, the capture is sent with a one-line
-  `[Opening prompt omitted: ...]` marker in its place. The rest of the conversation is captured
-  as usual. Older entries are ignored and pruned. Set `SUPERMEMORY_DEDUPE_OPENING_PROMPT=false`
-  to opt out.
+  at least 200 characters and matches one this machine successfully captured for the same API
+  base URL, credential and container tag in the last 24 hours, the capture is sent with a
+  one-line `[Opening prompt omitted: ...]` marker in its place. The rest of the conversation is
+  captured as usual. Older entries are ignored and pruned, nothing is deduped without a
+  credential, and `logout` deletes the index. Set `SUPERMEMORY_DEDUPE_OPENING_PROMPT=false` to
+  opt out.
 - **Recall query** (`dedupeRecallQueries`, default `true`). When the same normalized query is
   recalled against the same container tag within 10 minutes, the result of the first successful
   search is re-served without another API call, so a new session still gets the same context. A

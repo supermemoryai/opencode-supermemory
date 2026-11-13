@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import type { Plugin } from "@opencode/plugin";
 import type { SessionHooks } from "@opencode/plugin/promise/session";
 
-import { CONFIG, getRecallCacheScope, isConfigured, PLUGIN_VERSION } from "../config.js";
+import { CONFIG, getDedupeScope, isConfigured, PLUGIN_VERSION } from "../config.js";
 import {
   createMemoryActivityReporterFromSink,
   type MemoryActivityNotice,
@@ -152,7 +152,7 @@ const DEFAULT_DEPENDENCIES: V2RuntimeDependencies = {
   checkUpdate: () =>
     checkNpmUpdate("opencode-supermemory", PLUGIN_VERSION, UPDATE_COMMAND),
   openingPrompts: defaultOpeningPromptIndex(),
-  recallQueries: CONFIG.dedupeRecallQueries ? new RecallQueryCache(getRecallCacheScope) : null,
+  recallQueries: CONFIG.dedupeRecallQueries ? new RecallQueryCache(getDedupeScope) : null,
 };
 
 /** Minimal shape of an OpenCode 2 event as read from `ctx.event.subscribe()`. */

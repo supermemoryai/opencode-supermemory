@@ -52,11 +52,13 @@ function newest<T>(entries: Entries<T>, limit: number, at: (value: T) => number)
 }
 
 /**
- * Remembers which session first captured each long opening prompt per container
- * tag in the last 24 hours, so repeated one-shot workers do not re-send it.
+ * Remembers which session first captured each long opening prompt per backend,
+ * credential and container tag in the last 24 hours, so repeated one-shot workers
+ * do not re-send it.
  */
 export class OpeningPromptIndex {
   constructor(
+    private readonly scope: () => string | null,
     private readonly file = OPENING_PROMPTS_FILE,
     private readonly now: () => number = Date.now,
   ) {}
@@ -77,7 +79,9 @@ export class OpeningPromptIndex {
     if (prompt.length < OPENING_PROMPT_MIN_CHARS) return unchanged;
 
     try {
-      const hash = sha256(`${containerTag}\n${prompt}`);
+      const scope = this.scope();
+      if (!scope) return unchanged;
+      const hash = sha256([scope, containerTag, prompt].join("\n"));
       const owner = this.#fresh()[hash];
       if (owner && owner.sessionId !== sessionID) {
         return {

@@ -167,8 +167,8 @@ export function getApiKey(): string | undefined {
   return loadCredentials();
 }
 
-/** Hash of the backend URL and credential that scopes local recall caching; null without a credential. */
-export function getRecallCacheScope(): string | null {
+/** Hash of the backend URL and credential that scopes local dedupe and recall caching; null without a credential. */
+export function getDedupeScope(): string | null {
   try {
     const apiKey = getApiKey();
     const saved = apiKey ? null : loadCredentialData();

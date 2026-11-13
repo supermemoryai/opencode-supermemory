@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Part } from "@opencode-ai/sdk";
 
-import { CONFIG } from "../config.js";
+import { CONFIG, getDedupeScope } from "../config.js";
 import type { ConversationMessage } from "../types/index.js";
 import { supermemoryClient } from "./client.js";
 import { AGENT_ENTITY_CONTEXT } from "./entity-context.js";
@@ -72,7 +72,7 @@ export interface CaptureOptions {
 }
 
 export function defaultOpeningPromptIndex(): OpeningPromptIndex | null {
-  return CONFIG.dedupeOpeningPrompt ? new OpeningPromptIndex() : null;
+  return CONFIG.dedupeOpeningPrompt ? new OpeningPromptIndex(getDedupeScope) : null;
 }
 
 /** Replaces an opening prompt this machine already captured for the tag with a marker. */

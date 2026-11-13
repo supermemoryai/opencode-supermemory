@@ -28,7 +28,7 @@ import { isHeadlessCommand, SessionScope } from "./services/session-scope.js";
 import { RecallQueryCache } from "./services/local-dedupe.js";
 import { createCompactionHook, type CompactionContext } from "./services/compaction.js";
 
-import { isConfigured, CONFIG, getRecallCacheScope, PLUGIN_VERSION } from "./config.js";
+import { isConfigured, CONFIG, getDedupeScope, PLUGIN_VERSION } from "./config.js";
 import { log } from "./services/logger.js";
 import { checkNpmUpdate } from "./services/version-check.js";
 
@@ -118,7 +118,7 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
       { timeoutMs: DIRECT_RECALL_TIMEOUT_MS },
     );
   const recallSearch = CONFIG.dedupeRecallQueries
-    ? new RecallQueryCache(getRecallCacheScope).wrap(
+    ? new RecallQueryCache(getDedupeScope).wrap(
         [tags.canonical, ...tags.personalReads, ...tags.projectReads],
         searchForRecall,
       )
