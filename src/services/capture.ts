@@ -6,6 +6,7 @@ import { log } from "./logger.js";
 import type { ResolvedTags } from "./tags.js";
 import {
   captureSession,
+  holdExitUntilSettled,
   SESSION_CAPTURE_TIMEOUT_MS,
   sessionMetadata,
   type SessionWriter,
@@ -93,6 +94,7 @@ export function createCaptureHook(
     const previous = inFlight.get(sessionID) ?? Promise.resolve();
     const next = previous.catch(() => undefined).then(task);
     inFlight.set(sessionID, next);
+    holdExitUntilSettled(next);
     try {
       await next;
     } finally {

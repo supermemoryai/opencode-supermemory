@@ -30,7 +30,6 @@ export interface SessionDelta {
   offset: number;
   count: number;
   commit: () => void;
-  rollback: () => void;
 }
 
 export type SessionMetadata = Record<string, string | number>;
@@ -157,11 +156,34 @@ export function buildSessionDelta(
     offset,
     count,
     commit: () => writeCursor(sessionId, { count, generation, headHash }),
-    rollback: () => writeCursor(sessionId, previous),
   };
 }
 
-// The cursor advances before the send because `opencode run` exits on idle without waiting for plugins; a failed send rolls it back.
+const pendingCaptures = new Set<Promise<void>>();
+let exitHeld = false;
+
+export function holdExitUntilSettled(work: Promise<unknown>): void {
+  const settled = work.then(
+    () => undefined,
+    () => undefined,
+  );
+  pendingCaptures.add(settled);
+  void settled.then(() => pendingCaptures.delete(settled));
+  if (exitHeld) return;
+  exitHeld = true;
+  const exit = process.exit.bind(process);
+  process.exit = ((code?: number | string | null) => {
+    if (pendingCaptures.size === 0) return exit(code);
+    const grace = new Promise<void>((resolve) =>
+      setTimeout(resolve, SESSION_CAPTURE_TIMEOUT_MS),
+    );
+    void Promise.race([Promise.all(pendingCaptures), grace]).then(() =>
+      exit(code),
+    );
+    return undefined as never;
+  }) as typeof process.exit;
+}
+
 export async function captureSession(options: {
   writer: SessionWriter;
   namespace: string;
@@ -180,7 +202,6 @@ export async function captureSession(options: {
   const delta = buildSessionDelta(sessionId, messages);
   if (!delta) return true;
 
-  delta.commit();
   try {
     await writer.addSession(namespace, delta.raw, {
       sessionId,
@@ -191,7 +212,6 @@ export async function captureSession(options: {
       timeoutMs: options.timeoutMs ?? SESSION_CAPTURE_TIMEOUT_MS,
     });
   } catch (error) {
-    delta.rollback();
     logger("[session] failed to send session session", {
       sessionId,
       generation: delta.generation,
@@ -201,6 +221,7 @@ export async function captureSession(options: {
     return false;
   }
 
+  delta.commit();
   options.onSaved?.();
   logger("[session] session session sent", {
     sessionId,

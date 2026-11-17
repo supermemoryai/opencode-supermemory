@@ -12,6 +12,7 @@ import {
 import { supermemoryClient, type SupermemoryClient } from "../services/client.js";
 import {
   captureSession,
+  holdExitUntilSettled,
   SESSION_CAPTURE_TIMEOUT_MS,
   sessionMetadata,
 } from "../services/session.js";
@@ -957,6 +958,7 @@ export class V2Runtime {
     const previous = this.#captureInFlight.get(sessionID) ?? Promise.resolve();
     const next = previous.catch(() => undefined).then(task);
     this.#captureInFlight.set(sessionID, next);
+    holdExitUntilSettled(next);
     try {
       await next;
     } catch (error) {
