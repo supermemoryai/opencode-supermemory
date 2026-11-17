@@ -3,8 +3,10 @@ import { V5Client } from "./v5-client.js";
 import {
   CONFIG,
   PLUGIN_VERSION,
-  SUPERMEMORY_API_KEY,
+  createAuthenticatedFetch,
   getApiBaseUrl,
+  getApiKey,
+  getAuthToken,
   getApiVersion,
   isConfigured,
 } from "../config.js";
@@ -22,7 +24,6 @@ import type {
 
 const TIMEOUT_MS = 30000;
 const TIMEOUT_BACKSTOP_GRACE_MS = 250;
-const SETTINGS_UPDATE_TIMEOUT_MS = 3_000;
 const MAX_CONVERSATION_CHARS = 100_000;
 const OPENCODE_SOURCE = "opencode";
 
@@ -128,6 +129,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 
 export class SupermemoryClient {
   private client: Supermemory | V5Client | null = null;
+  private clientKey: string | null = null;
 
   private formatConversationMessage(message: ConversationMessage): string {
     const content =
@@ -160,43 +162,31 @@ export class SupermemoryClient {
   }
 
   private getClient(): Supermemory | V5Client {
+    // Rebuild when the endpoint changes; bearers are resolved per request, never cached.
+    const baseUrl = getApiBaseUrl();
+    const apiVersion = getApiVersion();
+    const clientKey = `${apiVersion} ${baseUrl}`;
+    if (this.client && this.clientKey && this.clientKey !== clientKey) this.client = null;
+    if ((!this.client || this.clientKey) && !isConfigured()) {
+      throw new Error(
+        "Supermemory authentication required. Run `bunx opencode-supermemory@latest login`, or set SUPERMEMORY_API_KEY.",
+      );
+    }
     if (!this.client) {
-      if (!isConfigured()) {
-        throw new Error("SUPERMEMORY_API_KEY not set");
-      }
-      const legacyClient = new Supermemory({
-        apiKey: SUPERMEMORY_API_KEY,
-        baseURL: getApiBaseUrl(),
-        defaultHeaders: { "x-sm-source": OPENCODE_SOURCE },
-      });
+      this.clientKey = clientKey;
       this.client =
-        getApiVersion() === "v5"
+        apiVersion === "v5"
           ? new V5Client(
-              SUPERMEMORY_API_KEY!,
-              getApiBaseUrl(),
-              legacyClient.settings,
+              () => getAuthToken(undefined, baseUrl),
+              baseUrl,
               TIMEOUT_MS - TIMEOUT_BACKSTOP_GRACE_MS,
             )
-          : legacyClient;
-      try {
-        void this.client.settings
-          .update(
-            {
-              shouldLLMFilter: true,
-              filterPrompt: CONFIG.filterPrompt,
-            },
-            { timeout: SETTINGS_UPDATE_TIMEOUT_MS, maxRetries: 0 },
-          )
-          .catch((error) => {
-            log("settings.update: best-effort update failed", {
-              error: error instanceof Error ? error.message : String(error),
+          : new Supermemory({
+              apiKey: getApiKey() || "oauth",
+              baseURL: baseUrl,
+              fetch: createAuthenticatedFetch(baseUrl),
+              defaultHeaders: { "x-sm-source": OPENCODE_SOURCE },
             });
-          });
-      } catch (error) {
-        log("settings.update: best-effort update failed", {
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
     }
     return this.client;
   }

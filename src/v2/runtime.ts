@@ -121,7 +121,8 @@ type RuntimeConfig = Pick<
 >;
 
 export interface V2RuntimeDependencies {
-  configured: boolean;
+  /** Auth state; a function is re-checked per hook so login/logout apply live. */
+  configured: boolean | (() => boolean);
   config: RuntimeConfig;
   memoryClient: RuntimeMemoryClient;
   executeTool: typeof executeSupermemoryTool;
@@ -131,7 +132,7 @@ export interface V2RuntimeDependencies {
 }
 
 const DEFAULT_DEPENDENCIES: V2RuntimeDependencies = {
-  configured: isConfigured(),
+  configured: isConfigured,
   config: CONFIG,
   memoryClient: supermemoryClient,
   executeTool: executeSupermemoryTool,
@@ -351,6 +352,11 @@ export class V2Runtime {
     return this.#active && this.#isOwner();
   }
 
+  get #configured(): boolean {
+    const { configured } = this.#deps;
+    return typeof configured === "function" ? configured() : configured;
+  }
+
   get trackedSessionCount(): number {
     return this.#states.size;
   }
@@ -395,9 +401,8 @@ export class V2Runtime {
     );
     if (!this.active) return;
 
-    if (!this.#deps.configured) {
-      logger("v2 plugin disabled - SUPERMEMORY_API_KEY not set (tools registered, hooks skipped)");
-      return;
+    if (!this.#configured) {
+      logger("v2 plugin not authenticated yet - hooks idle until login or SUPERMEMORY_API_KEY");
     }
 
     await this.#track(
@@ -419,7 +424,7 @@ export class V2Runtime {
     // Mirror the V1 `permission.ask` auto-allow: recall is read-only.
     await this.#track(
       this.#ctx.permission.hook("evaluate", (event) => {
-        if (!this.active) return;
+        if (!this.active || !this.#configured) return;
         if (event.action === RECALL_PERMISSION.action && event.effect === "ask") {
           event.effect = "allow";
         }
@@ -479,7 +484,7 @@ export class V2Runtime {
       const tags = await this.#resolveSession(sessionID);
       return await this.#deps.executeTool(args, tags, {
         memoryClient: this.#deps.memoryClient,
-        configured: this.#deps.configured,
+        configured: this.#configured,
         onSaved: () => this.#activity.saved(),
       });
     } catch (error) {
@@ -539,7 +544,7 @@ export class V2Runtime {
     sessionID: string;
     messages: RequestMessage[];
   }): Promise<void> {
-    if (!this.#deps.configured) return;
+    if (!this.#configured) return;
     const latestUser = event.messages.findLast((message) => message.role === "user");
     if (!latestUser) return;
     const userText = extractMessageText(latestUser);
@@ -573,7 +578,7 @@ export class V2Runtime {
     sessionID: string;
     system: Array<{ type: "text"; text: string }>;
   }): Promise<void> {
-    if (!this.#deps.configured || !this.#deps.config.compactionEnabled) return;
+    if (!this.#configured || !this.#deps.config.compactionEnabled) return;
     const memories = await this.#projectMemories(event.sessionID);
     event.system.push({ type: "text", text: createCompactionPrompt(memories) });
     this.#deps.logger("v2 compaction context injected", {
@@ -583,7 +588,7 @@ export class V2Runtime {
   }
 
   async handleEvent(event: V2Event): Promise<void> {
-    if (!this.active || this.#deduper.hasSeen(event.id)) return;
+    if (!this.active || !this.#configured || this.#deduper.hasSeen(event.id)) return;
     const sessionID = this.#eventSessionID(event);
 
     if (sessionID && event.type !== "session.compaction.ended") {
@@ -1104,7 +1109,11 @@ export async function setupV2(
   log("v2 plugin init", {
     generation: owner.generation,
     directory: ctx.location?.directory,
-    configured: runtime["active"] && (options?.configured ?? isConfigured()),
+    configured:
+      runtime["active"] &&
+      (typeof options?.configured === "function"
+        ? options.configured()
+        : options?.configured ?? isConfigured()),
   });
 
   try {

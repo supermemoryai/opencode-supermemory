@@ -63,14 +63,8 @@ export class V5Client {
   private sdk: Supermemory;
 
   constructor(
-    apiKey: string,
+    apiKey: string | (() => Promise<string>),
     baseUrl: string,
-    readonly settings: {
-      update(
-        body: { shouldLLMFilter: boolean; filterPrompt: string },
-        options?: LegacyOptions,
-      ): Promise<unknown>;
-    },
     private readonly listBudgetMs: number,
   ) {
     this.sdk = new Supermemory({

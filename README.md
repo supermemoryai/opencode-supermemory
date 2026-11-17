@@ -86,9 +86,10 @@ is safe to re-run; if anything is missing, add it manually:
     "opencode-supermemory",
     // ... other OpenCode 2 plugins
   ],
-  "permissions": [
-    { "action": "supermemory_recall", "resource": "*", "effect": "allow" },
-  ],
+  // OpenCode V1 rejects V2 "permissions"; OpenCode 2 reads this as the same rule
+  "permission": {
+    "supermemory_recall": "allow",
+  },
 }
 ```
 
@@ -97,6 +98,11 @@ is safe to re-run; if anything is missing, add it manually:
 ```bash
 bunx opencode-supermemory@latest login
 ```
+
+`login` signs in with OAuth (browser consent, callback on `127.0.0.1:19880`) and
+saves refreshable credentials to `~/.supermemory-opencode/credentials.json`. Running
+OpenCode sessions pick up a login or logout without a restart. `logout` revokes the
+saved refresh token. An existing saved API key keeps working until you run `login`.
 
 For headless environments, set `SUPERMEMORY_API_KEY` manually, or create
 `~/.config/opencode/supermemory.jsonc`:
@@ -220,9 +226,7 @@ OpenCode 2 side by side:
 {
   "plugin": ["opencode-supermemory@latest"],
   "plugins": ["opencode-supermemory"],
-  "permissions": [
-    { "action": "supermemory_recall", "resource": "*", "effect": "allow" },
-  ],
+  "permission": { "supermemory_recall": "allow" },
 }
 ```
 
@@ -299,8 +303,9 @@ does not require a migration.
 | `SUPERMEMORY_API_KEY` | Your Supermemory API key (takes precedence over the config file). |
 | `SUPERMEMORY_API_URL` / `SUPERMEMORY_BASE_URL` | Override the Supermemory API base URL. |
 | `SUPERMEMORY_API_VERSION` | Select `legacy` or `v5`, overriding `apiVersion` in the config file. |
-| `SUPERMEMORY_AUTH_URL` | Override the browser-auth base URL. |
-| `SUPERMEMORY_AUTH_TIMEOUT` | Browser-auth timeout in milliseconds (default 5 minutes). |
+| `SUPERMEMORY_MCP_URL` | OAuth resource / MCP URL (default `https://mcp.supermemory.ai/mcp`; required for OAuth against a custom API URL that is not `api.*`). |
+| `SUPERMEMORY_OAUTH_ISSUER` | Override the OAuth issuer (default `<API URL>/api/auth`). |
+| `SUPERMEMORY_AUTH_TIMEOUT` | Browser-login timeout in milliseconds (default 5 minutes). |
 | `SUPERMEMORY_REPO_TAG` | Explicit project-container override, checked before the config value. |
 | `SUPERMEMORY_ISOLATE_WORKTREES` | Set to `true` to key the project container on the worktree path instead of the Git remote. |
 | `SUPERMEMORY_DEBUG` | Set to show `[recall-decision]` lines and enable debug logging. |
@@ -315,13 +320,10 @@ keep the old content protocol on any endpoint. Failed requests never switch API
 versions or reroute to hosted Supermemory, and existing container names, IDs,
 credentials, capture cadence, and configuration files are not migrated or renamed.
 
-The existing best-effort `filterPrompt` / `shouldLLMFilter` settings update remains
-on the legacy settings endpoint for both protocols. v5 has no equivalent filter
-toggle; the plugin does not replace organization context or request administrator
-permissions. A server without that legacy endpoint cannot apply these settings;
-capture and recall still work, and the failure is recorded in the existing log.
-Browser login and account status also retain their separate legacy auth/session
-boundary.
+The plugin never changes organization settings. Extraction guidance travels with
+each saved document as `entityContext`, so it applies only to OpenCode's own
+memories. Account status reads `/session`; only legacy mode falls back to
+`/v3/session` for older servers.
 
 v5 capture uses document POST append/diff with `dreaming: "dynamic"`; accepted
 documents may take minutes to form recallable memories. The plugin does not enable
