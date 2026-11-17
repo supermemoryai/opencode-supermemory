@@ -739,7 +739,6 @@ export class SupermemoryClient {
       timeoutMs?: number;
     },
   ): Promise<void> {
-    if (!SUPERMEMORY_API_KEY) throw new Error("SUPERMEMORY_API_KEY not set");
     const baseUrl = getApiBaseUrl().replace(/\/+$/, "");
     const metadata: Record<string, string | number> = {
       sm_source: OPENCODE_SOURCE,
@@ -766,7 +765,7 @@ export class SupermemoryClient {
       {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${SUPERMEMORY_API_KEY}`,
+          Authorization: `Bearer ${await getAuthToken(undefined, baseUrl)}`,
           "Content-Type": "application/json",
           "x-sm-source": OPENCODE_SOURCE,
           "x-sm-session": OPENCODE_SOURCE,
