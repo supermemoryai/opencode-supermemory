@@ -179,6 +179,7 @@ function harness(
       get: async ({ sessionID }: { sessionID: string }) => ({
         id: sessionID,
         location: { directory: "/repo" },
+        ...(sessionID.startsWith("child") ? { parentID: "s1" } : {}),
       }),
       context: async () => state.transcript,
     },
@@ -373,6 +374,44 @@ describe("OpenCode 2 runtime", () => {
     expect(texts(message).at(-1)).toContain(SUPERMEMORY_RECALL_TOOL_NAME);
     expect(h.queries).toHaveLength(0);
     h.runtime.cleanup();
+  });
+
+  test("leaves subagent sessions alone unless captureSubagents is set", async () => {
+    const h = harness();
+    await h.runtime.register();
+    h.transcript = [user("u1", "explore the repo"), assistant("a1", "found it")];
+
+    const message = request("m1", "Find where the auth middleware lives");
+    await h.runtime.handleContext({ sessionID: "child-1", messages: [message] });
+    await h.runtime.handleCompaction({ sessionID: "child-1", system: [] });
+    await h.runtime.handleEvent({
+      id: "c1",
+      type: "session.execution.succeeded",
+      data: { sessionID: "child-1" },
+    });
+    await h.runtime.handleEvent({ id: "c2", type: "session.deleted", data: { sessionID: "child-1" } });
+    await h.runtime.idle();
+    expect(texts(message)).toEqual(["Find where the auth middleware lives"]);
+    expect(h.queries).toEqual([]);
+    expect(h.writes).toEqual([]);
+    h.runtime.cleanup();
+
+    const optedIn = harness({ captureSubagents: true });
+    await optedIn.runtime.register();
+    optedIn.transcript = [user("u1", "explore the repo"), assistant("a1", "found it")];
+    await optedIn.runtime.handleContext({
+      sessionID: "child-2",
+      messages: [request("m2", "Find where the auth middleware lives")],
+    });
+    await optedIn.runtime.handleEvent({
+      id: "c3",
+      type: "session.execution.succeeded",
+      data: { sessionID: "child-2" },
+    });
+    await optedIn.runtime.idle();
+    expect(optedIn.queries).toHaveLength(1);
+    expect(optedIn.writes).toHaveLength(1);
+    optedIn.runtime.cleanup();
   });
 
   test("captures completed turns idempotently and saves compaction summaries", async () => {
