@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
+import { MAX_CAPTURE_ATTEMPTS } from "../services/capture.js";
 import { COMPACTION_CONTEXT_MARKER } from "../services/compaction-prompt.js";
 import { executeSupermemoryTool } from "../services/memory-tool.js";
 import { DEFAULT_RECALL_DIRECTIVE } from "../services/recall.js";
@@ -8,13 +9,16 @@ import {
   applyInjection,
   buildTranscriptTurns,
   buildV2RecallDirective,
+  isSameDirectory,
   mergeTurns,
+  setupV2,
   SUPERMEMORY_RECALL_TOOL_NAME,
   SUPERMEMORY_TOOL_NAME,
   V2Runtime,
   type RequestMessage,
   type TranscriptMessage,
   type V2Context,
+  type V2Event,
   type V2RuntimeDependencies,
 } from "./runtime.js";
 
@@ -133,12 +137,29 @@ interface Harness {
   writes: Array<{ customId?: string; timeoutMs?: number; metadata?: Record<string, unknown> }>;
   adds: Array<{ content: string; customId?: string; metadata?: Record<string, unknown> }>;
   emitted: Array<{ kind?: unknown; message?: unknown }>;
+  sessionLookups: string[];
   transcript: TranscriptMessage[];
+}
+
+interface HarnessOptions {
+  /** The plugin instance's location. */
+  directory?: string;
+  /** Directory OpenCode reports for a session; throw to simulate a failed lookup. */
+  sessionDirectory?: (sessionID: string) => string;
+  /** Result of each capture write. */
+  writeResult?: () => { success: boolean; error?: string };
+  /** Plugin storage shared between runtimes, as OpenCode keeps it across reloads. */
+  storage?: Map<string, unknown>;
 }
 
 function harness(
   config: Partial<V2RuntimeDependencies["config"]> = {},
+  options: HarnessOptions = {},
 ): Harness {
+  const harnessOptions = options;
+  const directory = options.directory ?? "/repo";
+  const sessionDirectory = options.sessionDirectory ?? (() => directory);
+  const sessionLookups: string[] = [];
   const tools = new Map<string, FakeTool>();
   const hooks: Harness["hooks"] = {};
   const queries: string[] = [];
@@ -148,8 +169,18 @@ function harness(
   const state: { transcript: TranscriptMessage[] } = { transcript: [] };
   const registration = { dispose: async () => undefined };
 
+  const storage = options.storage;
   const ctx = {
-    location: { directory: "/repo" },
+    location: { directory },
+    ...(storage
+      ? {
+          storage: {
+            get: async (key: string) => storage.get(key),
+            set: async (key: string, value: unknown) => void storage.set(key, value),
+            remove: async (key: string) => void storage.delete(key),
+          },
+        }
+      : {}),
     tool: {
       transform: async (callback: (editor: unknown) => void) => {
         callback({
@@ -176,10 +207,10 @@ function harness(
         hooks[`session.${name}`] = callback;
         return registration;
       },
-      get: async ({ sessionID }: { sessionID: string }) => ({
-        id: sessionID,
-        location: { directory: "/repo" },
-      }),
+      get: async ({ sessionID }: { sessionID: string }) => {
+        sessionLookups.push(sessionID);
+        return { id: sessionID, location: { directory: sessionDirectory(sessionID) } };
+      },
       context: async () => state.transcript,
     },
     permission: {
@@ -236,7 +267,7 @@ function harness(
       options?: { customId?: string; timeoutMs?: number },
     ) => {
       writes.push({ customId: options?.customId, timeoutMs: options?.timeoutMs, metadata });
-      return { success: true };
+      return harnessOptions.writeResult?.() ?? { success: true };
     },
     addMemory: async (
       content: string,
@@ -281,6 +312,7 @@ function harness(
     writes,
     adds,
     emitted,
+    sessionLookups,
     get transcript() {
       return state.transcript;
     },
@@ -462,5 +494,302 @@ describe("OpenCode 2 runtime", () => {
     });
     expect(h.emitted.map((event) => event.kind)).toEqual(["recalling", "recalled"]);
     h.runtime.cleanup();
+  });
+});
+
+function ownershipContext(directory: string): V2Context {
+  const registration = { dispose: async () => undefined };
+  return {
+    location: { directory },
+    tool: {
+      transform: async () => registration,
+      hook: async () => registration,
+      reload: async () => undefined,
+      list: async () => [],
+    },
+    session: {
+      hook: async () => registration,
+      get: async ({ sessionID }: { sessionID: string }) => ({
+        id: sessionID,
+        location: { directory },
+      }),
+      context: async () => [],
+    },
+    permission: {
+      hook: async () => registration,
+    },
+    rpc: {
+      register: async () => ({
+        ...registration,
+        events: { emit: async () => undefined },
+      }),
+    },
+    event: {
+      subscribe: () => ({
+        [Symbol.asyncIterator]: () => ({
+          next: () => new Promise<IteratorResult<unknown>>(() => undefined),
+        }),
+      }),
+    },
+  } as unknown as V2Context;
+}
+
+function ownershipDeps(): Partial<V2RuntimeDependencies> {
+  return {
+    configured: true,
+    config: {
+      recallMode: "direct",
+      injectProfile: false,
+      captureEveryNTurns: 1,
+      compactionEnabled: false,
+      keywordPatterns: [],
+      maxProjectMemories: 10,
+    } as V2RuntimeDependencies["config"],
+    memoryClient: {
+      searchMemories: async () => ({ success: true, results: [] }),
+      addMemory: async () => ({ success: true, id: "mem_1" }),
+    } as unknown as V2RuntimeDependencies["memoryClient"],
+    executeTool: executeSupermemoryTool,
+    resolveTags: () => tags,
+    logger: () => undefined,
+    checkUpdate: async () => ({
+      currentVersion: "2.0.15",
+      latestVersion: "2.0.15",
+      updateCommand: "bunx opencode-supermemory@latest install",
+    }),
+  };
+}
+
+function ownerFor(directory: string): { generation: number } | undefined {
+  return (
+    globalThis as unknown as Record<
+      symbol,
+      { generation: number } | undefined
+    >
+  )[Symbol.for(`opencode-supermemory.v2.owner:${directory}`)];
+}
+
+describe("OpenCode 2 runtime session ownership", () => {
+  // OpenCode delivers every location's events to every plugin instance, so two
+  // runtimes for different directories both receive each event below.
+  const directories: Record<string, string> = {
+    "ses-a": "/repo-a",
+    "ses-b": "/repo-b",
+  };
+  const lookup = (sessionID: string) => {
+    const directory = directories[sessionID];
+    if (!directory) throw new Error(`Session not found: ${sessionID}`);
+    return directory;
+  };
+  const pair = () => {
+    const a = harness({}, { directory: "/repo-a", sessionDirectory: lookup });
+    const b = harness({}, { directory: "/repo-b", sessionDirectory: lookup });
+    a.transcript = [user("u1", "question 1"), assistant("a1", "answer 1")];
+    b.transcript = a.transcript;
+    return { a, b };
+  };
+  const broadcast = async (runtimes: V2Runtime[], event: V2Event) => {
+    for (const runtime of runtimes) await runtime.handleEvent(event);
+    await Promise.all(runtimes.map((runtime) => runtime.idle()));
+  };
+
+  test("captures a session only in the runtime for its directory", async () => {
+    const { a, b } = pair();
+    await a.runtime.register();
+    await b.runtime.register();
+
+    await broadcast([a.runtime, b.runtime], {
+      id: "e1",
+      type: "session.execution.succeeded",
+      data: { sessionID: "ses-a" },
+    });
+    await broadcast([a.runtime, b.runtime], {
+      id: "e2",
+      type: "session.execution.succeeded",
+      data: { sessionID: "ses-b" },
+    });
+
+    expect(a.writes.map((write) => write.metadata?.sessionId)).toEqual(["ses-a"]);
+    expect(b.writes.map((write) => write.metadata?.sessionId)).toEqual(["ses-b"]);
+    a.runtime.cleanup();
+    b.runtime.cleanup();
+  });
+
+  test("caches ownership per session and trusts sessions it already serves", async () => {
+    const { a, b } = pair();
+    await a.runtime.register();
+    await b.runtime.register();
+
+    // ses-a reached runtime A through its directory-scoped context hook.
+    await a.runtime.handleContext({
+      sessionID: "ses-a",
+      messages: [request("u1", "continue the auth flow work from before")],
+    });
+    const lookupsBefore = a.sessionLookups.length;
+
+    for (const id of ["e1", "e2", "e3"]) {
+      await broadcast([a.runtime, b.runtime], {
+        id,
+        type: "session.execution.succeeded",
+        data: { sessionID: "ses-a" },
+      });
+    }
+
+    expect(a.sessionLookups.length).toBe(lookupsBefore);
+    expect(b.sessionLookups).toEqual(["ses-a"]);
+    expect(b.writes).toHaveLength(0);
+    expect(a.writes).toHaveLength(1);
+    a.runtime.cleanup();
+    b.runtime.cleanup();
+  });
+
+  test("uses the event location when present and skips sessions it cannot place", async () => {
+    const { a, b } = pair();
+    await a.runtime.register();
+    await b.runtime.register();
+
+    const summary = "Summary ".repeat(20);
+    await broadcast([a.runtime, b.runtime], {
+      id: "e1",
+      type: "session.compaction.ended",
+      data: { sessionID: "ses-b", text: summary, reason: "auto" },
+      location: { directory: "/repo-b/" },
+    });
+    expect(a.adds).toHaveLength(0);
+    expect(b.adds).toHaveLength(1);
+    expect(a.sessionLookups).not.toContain("ses-b");
+
+    await broadcast([a.runtime, b.runtime], {
+      id: "e2",
+      type: "session.execution.succeeded",
+      data: { sessionID: "ses-unknown" },
+    });
+    expect(a.writes).toHaveLength(0);
+    expect(b.writes).toHaveLength(0);
+    a.runtime.cleanup();
+    b.runtime.cleanup();
+  });
+
+  test("does not re-send saved batches when the runtime shuts down", async () => {
+    const h = harness({}, { directory: "/repo-a", sessionDirectory: lookup });
+    h.transcript = [user("u1", "question 1"), assistant("a1", "answer 1")];
+    await h.runtime.register();
+    await h.runtime.handleEvent({
+      id: "e1",
+      type: "session.execution.succeeded",
+      data: { sessionID: "ses-a" },
+    });
+    await h.runtime.idle();
+    expect(h.writes).toHaveLength(1);
+
+    h.transcript = [...h.transcript, user("u2", "question 2"), assistant("a2", "answer 2")];
+    h.runtime.cleanup();
+    await h.runtime.idle();
+    expect(h.writes).toHaveLength(2);
+    expect(h.writes[1]?.customId).not.toBe(h.writes[0]?.customId);
+  });
+
+  test("stops re-sending a batch after repeated failed writes", async () => {
+    const h = harness(
+      {},
+      {
+        directory: "/repo-a",
+        sessionDirectory: lookup,
+        // The server stays slow: every write times out on the client.
+        writeResult: () => ({ success: false, error: "Timeout after 3250ms" }),
+      },
+    );
+    await h.runtime.register();
+    const turns: TranscriptMessage[] = [];
+    for (let turn = 1; turn <= 6; turn += 1) {
+      turns.push(user(`u${turn}`, `question ${turn}`), assistant(`a${turn}`, `answer ${turn}`));
+      h.transcript = [...turns];
+      await h.runtime.handleEvent({
+        id: `e${turn}`,
+        type: "session.execution.succeeded",
+        data: { sessionID: "ses-a" },
+      });
+      await h.runtime.idle();
+    }
+
+    const perBatch = new Map<string, number>();
+    for (const write of h.writes) {
+      perBatch.set(write.customId!, (perBatch.get(write.customId!) ?? 0) + 1);
+    }
+    expect(Math.max(...perBatch.values())).toBe(MAX_CAPTURE_ATTEMPTS);
+    // Unbounded retries would have sent 1 + 2 + ... + 6 = 21 writes.
+    expect(h.writes.length).toBeLessThan(21);
+    h.runtime.cleanup();
+  });
+
+  test("a reloaded runtime does not re-send batches saved before the reload", async () => {
+    const storage = new Map<string, unknown>();
+    const first = harness({}, { directory: "/repo-a", sessionDirectory: lookup, storage });
+    first.transcript = [user("u1", "question 1"), assistant("a1", "answer 1")];
+    await first.runtime.register();
+    await first.runtime.handleEvent({
+      id: "e1",
+      type: "session.execution.succeeded",
+      data: { sessionID: "ses-a" },
+    });
+    await first.runtime.idle();
+    first.runtime.cleanup();
+    await first.runtime.idle();
+    expect(first.writes).toHaveLength(1);
+
+    const second = harness({}, { directory: "/repo-a", sessionDirectory: lookup, storage });
+    second.transcript = [
+      ...first.transcript,
+      user("u2", "question 2"),
+      assistant("a2", "answer 2"),
+    ];
+    await second.runtime.register();
+    await second.runtime.handleEvent({
+      id: "e2",
+      type: "session.execution.succeeded",
+      data: { sessionID: "ses-a" },
+    });
+    await second.runtime.idle();
+
+    expect(second.writes).toHaveLength(1);
+    expect(second.writes[0]?.customId).not.toBe(first.writes[0]?.customId);
+
+    await second.runtime.handleEvent({
+      id: "e3",
+      type: "session.deleted",
+      data: { sessionID: "ses-a" },
+    });
+    await second.runtime.idle();
+    await Promise.resolve();
+    expect([...storage.keys()]).toEqual([]);
+    second.runtime.cleanup();
+  });
+
+  test("compares directories after normalizing them", () => {
+    expect(isSameDirectory("/repo-a/", "/repo-a")).toBe(true);
+    expect(isSameDirectory("/repo-a/../repo-a", "/repo-a")).toBe(true);
+    expect(isSameDirectory("/repo-a", "/repo-ab")).toBe(false);
+  });
+});
+
+describe("OpenCode 2 runtime ownership", () => {
+  test("each project directory owns its runtime; hot reload replaces only the same directory", async () => {
+    const cleanupA1 = await setupV2(ownershipContext("/repo-a"), ownershipDeps());
+    const cleanupB1 = await setupV2(ownershipContext("/repo-b"), ownershipDeps());
+
+    expect(ownerFor("/repo-a")?.generation).toBe(1);
+    expect(ownerFor("/repo-b")?.generation).toBe(1);
+
+    // A same-directory hot reload replaces the previous generation...
+    const cleanupA2 = await setupV2(ownershipContext("/repo-a"), ownershipDeps());
+    expect(ownerFor("/repo-a")?.generation).toBe(2);
+    // ...but a different directory never disposes another directory's runtime.
+    expect(ownerFor("/repo-b")?.generation).toBe(1);
+
+    cleanupA2();
+    cleanupA1();
+    cleanupB1();
+    expect(ownerFor("/repo-a")).toBeUndefined();
+    expect(ownerFor("/repo-b")).toBeUndefined();
   });
 });

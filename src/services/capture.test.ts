@@ -3,6 +3,7 @@ import type { Part } from "@opencode-ai/sdk";
 
 import {
   AUTOMATIC_CAPTURE_TIMEOUT_MS,
+  MAX_CAPTURE_ATTEMPTS,
   buildCadenceBatches,
   buildCaptureTurns,
   buildSessionEndBatch,
@@ -283,5 +284,40 @@ describe("automatic conversation capture", () => {
       { timeout: AUTOMATIC_CAPTURE_TIMEOUT_MS, maxRetries: 0 },
     ]);
     expect(readAttempts).toBe(3);
+  });
+  test("stops re-sending a batch after repeated failed writes", async () => {
+    let messages = conversation(1);
+    const writes: string[] = [];
+    const hook = createCaptureHook(
+      { directory: "/repo", client: { session: { messages: async () => ({ data: messages }) } } },
+      {
+        canonical: "repo_test__0123456789abcdef",
+        user: "repo_test__0123456789abcdef",
+        project: "repo_test__0123456789abcdef",
+        projectId: "0123456789abcdef",
+        projectName: "test",
+        personalReads: [],
+        projectReads: [],
+        allReads: [],
+      },
+      {
+        captureEveryNTurns: 1,
+        memoryClient: {
+          ingestConversation: async (_id, _messages, _tags, _metadata, options) => {
+            writes.push(options?.customId ?? "");
+            return { success: false, error: "Timeout after 3250ms" };
+          },
+        },
+      },
+    );
+
+    for (let turn = 1; turn <= 6; turn += 1) {
+      messages = conversation(turn);
+      await hook.event({ event: { type: "session.idle", properties: { sessionID: "session-1" } } });
+    }
+
+    const firstBatch = writes.filter((id) => id === writes[0]).length;
+    expect(firstBatch).toBe(MAX_CAPTURE_ATTEMPTS);
+    expect(writes.length).toBeLessThan(21);
   });
 });
