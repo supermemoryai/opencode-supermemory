@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.1.3
+
+- Back off failed compaction summary saves with jittered exponential delays starting at 15s, and drop a summary after 5 failed attempts instead of re-sending it on every event (#128).
+
 ## 2.1.2
 
 - Keep `login` waiting for the callback when no browser can be opened, and print the URL to open instead of failing (#72).

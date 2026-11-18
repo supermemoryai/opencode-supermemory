@@ -60,6 +60,8 @@ const UPDATE_COMMAND = "bunx opencode-supermemory@latest install";
 const MAX_DISPATCHES_PER_SESSION = 8;
 const MIN_SUMMARY_CHARS = 100;
 const SUMMARY_SAVE_TIMEOUT_MS = 3_000;
+const MAX_SUMMARY_ATTEMPTS = 5;
+const SUMMARY_RETRY_BASE_MS = 15_000;
 
 export const SUPERMEMORY_TOOL_NAME = "supermemory";
 export const SUPERMEMORY_RECALL_TOOL_NAME = "supermemory_recall";
@@ -168,6 +170,8 @@ interface PendingSummary {
   customId: string;
   sessionID: string;
   text: string;
+  attempts: number;
+  retryAt: number;
 }
 
 interface Registration {
@@ -639,7 +643,13 @@ export class V2Runtime {
         }
         const eventId = event.id ?? sha256(`${sessionID}:${text}`);
         const customId = `opencode:compaction:${sha256(`${sessionID}:${eventId}`)}`;
-        this.#pendingSummaries.set(customId, { customId, sessionID, text });
+        this.#pendingSummaries.set(customId, {
+          customId,
+          sessionID,
+          text,
+          attempts: 0,
+          retryAt: 0,
+        });
         await this.#retryPendingSummaries(sessionID);
         return;
       }
@@ -978,8 +988,12 @@ export class V2Runtime {
     allowInactive = false,
   ): Promise<void> {
     if (!allowInactive && !this.active) return;
+    const now = Date.now();
     const pending = [...this.#pendingSummaries.values()].filter(
-      (item) => item.sessionID === sessionID,
+      (item) =>
+        item.sessionID === sessionID &&
+        item.retryAt <= now &&
+        !this.#summaryInFlight.has(item.customId),
     );
     if (pending.length === 0) return;
 
@@ -1023,20 +1037,34 @@ export class V2Runtime {
             memoryId: result.id,
           });
         } else {
+          this.#deferSummary(summary);
           this.#deps.logger("[compaction] failed to save summary", {
             sessionID,
             error: result.error,
+            attempts: summary.attempts,
           });
         }
       } catch (error) {
+        this.#deferSummary(summary);
         this.#deps.logger("[compaction] failed to save summary", {
           sessionID,
           error: String(error),
+          attempts: summary.attempts,
         });
       } finally {
         this.#summaryInFlight.delete(summary.customId);
       }
     }
+  }
+
+  #deferSummary(summary: PendingSummary): void {
+    summary.attempts += 1;
+    if (summary.attempts >= MAX_SUMMARY_ATTEMPTS) {
+      this.#pendingSummaries.delete(summary.customId);
+      return;
+    }
+    const backoff = SUMMARY_RETRY_BASE_MS * 2 ** (summary.attempts - 1);
+    summary.retryAt = Date.now() + backoff / 2 + Math.random() * (backoff / 2);
   }
 
   #eventSessionID(event: V2Event): string | undefined {
