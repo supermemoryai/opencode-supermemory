@@ -26,6 +26,7 @@ const TIMEOUT_MS = 30000;
 const TIMEOUT_BACKSTOP_GRACE_MS = 250;
 const MAX_CONVERSATION_CHARS = 100_000;
 const OPENCODE_SOURCE = "opencode";
+const LEGACY_TAG_RECHECK_MS = 60 * 60 * 1000;
 
 export interface MemoryRequestOptions {
   timeoutMs?: number;
@@ -130,6 +131,32 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 export class SupermemoryClient {
   private client: Supermemory | V5Client | null = null;
   private clientKey: string | null = null;
+  private legacyTagChecks = new Map<
+    string,
+    { hasMemories: boolean; checkedAt: number }
+  >();
+  private legacyTagProbes = new Set<string>();
+
+  private shouldSearchLegacyTag(containerTag: string): boolean {
+    const check = this.legacyTagChecks.get(containerTag);
+    if (
+      (!check || Date.now() - check.checkedAt >= LEGACY_TAG_RECHECK_MS) &&
+      !this.legacyTagProbes.has(containerTag)
+    ) {
+      this.legacyTagProbes.add(containerTag);
+      void this.getProfile(containerTag)
+        .then((result) => {
+          if (!result.success || !result.profile) return;
+          this.legacyTagChecks.set(containerTag, {
+            hasMemories:
+              result.profile.static.length + result.profile.dynamic.length > 0,
+            checkedAt: Date.now(),
+          });
+        })
+        .finally(() => this.legacyTagProbes.delete(containerTag));
+    }
+    return check?.hasMemories ?? true;
+  }
 
   private formatConversationMessage(message: ConversationMessage): string {
     const content =
@@ -294,18 +321,20 @@ export class SupermemoryClient {
     projectTags: string[],
     options?: MemoryRequestOptions,
   ): Promise<SearchResponse> {
+    const shouldSearch = (tag: string) =>
+      tag === canonicalTag || this.shouldSearchLegacyTag(tag);
     const responses = await Promise.all([
       this.searchMemoriesScoped(
         query,
         canonicalTag,
-        personalTags,
+        personalTags.filter(shouldSearch),
         "personal",
         options,
       ),
       this.searchMemoriesScoped(
         query,
         canonicalTag,
-        projectTags,
+        projectTags.filter(shouldSearch),
         "project",
         options,
       ),
