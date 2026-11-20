@@ -1,5 +1,6 @@
 import {
   Supermemory,
+  SupermemoryError,
   type FilterExpression,
   type RequestOptions,
 } from "supermemory";
@@ -61,6 +62,7 @@ function deletionError(
 
 export class V5Client {
   private sdk: Supermemory;
+  private nextDocumentWriteAt = 0;
 
   constructor(
     apiKey: string | (() => Promise<string>),
@@ -151,6 +153,9 @@ export class V5Client {
       },
       options?: LegacyOptions,
     ): Promise<{ id: string; status: string }> => {
+      if (Date.now() < this.nextDocumentWriteAt) {
+        throw new Error("Document writes are rate limited. Try again after the cooldown.");
+      }
       const result = await this.sdk.add(
         request.containerTag,
         {
@@ -162,7 +167,20 @@ export class V5Client {
           dreaming: "dynamic",
         },
         requestOptions(options),
-      );
+      ).catch((error: unknown) => {
+        if (error instanceof SupermemoryError && error.statusCode === 429) {
+          const retryAfter = error.rawResponse?.headers.get("retry-after")?.trim();
+          const now = Date.now();
+          const retryAt = retryAfter && /^\d+$/.test(retryAfter)
+            ? now + Number(retryAfter) * 1000
+            : Date.parse(retryAfter ?? "");
+          this.nextDocumentWriteAt = Math.max(
+            this.nextDocumentWriteAt,
+            Number.isFinite(retryAt) && retryAt > now ? retryAt : now + 60_000,
+          );
+        }
+        throw error;
+      });
       if (
         !result.id?.trim() ||
         ![
