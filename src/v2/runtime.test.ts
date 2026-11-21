@@ -347,12 +347,14 @@ describe("OpenCode 2 runtime", () => {
     expect(texts(continuation)).toEqual(firstTexts);
     expect(h.queries).toHaveLength(1);
 
-    // New prompt: no profile again, repeated memory suppressed per session.
+    // New prompt: earlier prompt re-injected identically, no profile, repeats suppressed.
+    const firstAgain = request("u1", "continue the auth flow work from before");
     const second = request("u2", "remember that we deploy with bun");
     await h.runtime.handleContext({
       sessionID: "s1",
-      messages: [first, second],
+      messages: [firstAgain, second],
     });
+    expect(texts(firstAgain)).toEqual(firstTexts);
     const secondTexts = texts(second);
     expect(h.queries).toHaveLength(2);
     expect(secondTexts[0]).toBe("remember that we deploy with bun");
@@ -362,6 +364,27 @@ describe("OpenCode 2 runtime", () => {
     const kinds = h.emitted.map((event) => event.kind);
     expect(kinds).toContain("recalled");
     expect(kinds).toContain("update-available");
+    h.runtime.cleanup();
+  });
+
+  test("memories return once their prompt is compacted out of the request", async () => {
+    const h = harness({ injectProfile: false });
+    await h.runtime.register();
+
+    const first = request("u1", "continue the auth flow work from before");
+    await h.runtime.handleContext({ sessionID: "s1", messages: [first] });
+    expect(texts(first).at(-1)).toContain("Uses bun, not Node.js");
+
+    const repeat = request("u2", "and the deploy flow work from before");
+    await h.runtime.handleContext({
+      sessionID: "s1",
+      messages: [request("u1", "continue the auth flow work from before"), repeat],
+    });
+    expect(texts(repeat).some((text) => text.includes("Uses bun, not Node.js"))).toBe(false);
+
+    const afterCompaction = request("u3", "pick the auth flow work back up");
+    await h.runtime.handleContext({ sessionID: "s1", messages: [afterCompaction] });
+    expect(texts(afterCompaction).at(-1)).toContain("Uses bun, not Node.js");
     h.runtime.cleanup();
   });
 
