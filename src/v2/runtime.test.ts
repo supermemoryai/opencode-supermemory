@@ -1,4 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { COMPACTION_CONTEXT_MARKER } from "../services/compaction-prompt.js";
 import { executeSupermemoryTool } from "../services/memory-tool.js";
@@ -6,14 +9,21 @@ import { DEFAULT_RECALL_DIRECTIVE } from "../services/recall.js";
 import type { ResolvedTags } from "../services/tags.js";
 import {
   applyInjection,
+  buildTranscriptTurns,
   buildV2RecallDirective,
+  mergeTurns,
   SUPERMEMORY_RECALL_TOOL_NAME,
   SUPERMEMORY_TOOL_NAME,
   V2Runtime,
   type RequestMessage,
+  type TranscriptMessage,
   type V2Context,
   type V2RuntimeDependencies,
 } from "./runtime.js";
+
+beforeEach(() => {
+  process.env.SUPERMEMORY_SESSION_DIR = mkdtempSync(join(tmpdir(), "sm-v2-session-"));
+});
 
 const tags: ResolvedTags = {
   canonical: "repo_test__0123456789abcdef",
@@ -25,6 +35,18 @@ const tags: ResolvedTags = {
   projectReads: [],
   allReads: [],
 };
+
+function user(id: string, text: string): TranscriptMessage {
+  return { id, type: "user", text };
+}
+
+function assistant(
+  id: string,
+  text: string,
+  finish: string = "stop",
+): TranscriptMessage {
+  return { id, type: "assistant", finish, content: [{ type: "text", text }] };
+}
 
 function request(id: string, text: string): RequestMessage {
   return {
@@ -39,6 +61,49 @@ function texts(message: RequestMessage): string[] {
     (part) => part.text ?? "",
   );
 }
+
+describe("OpenCode 2 transcript capture", () => {
+  test("groups completed turns and protects private content", () => {
+    const turns = buildTranscriptTurns([
+      { id: "sys", type: "system", text: "injected" },
+      user("u1", "real prompt"),
+      assistant("a1", "calling a tool", "tool-calls"),
+      assistant("a2", "real answer"),
+      user("u2", "<private>secret prompt</private>"),
+      assistant("a3", "secret answer"),
+      user("u3", "token <private>secret</private>"),
+      assistant("a4", "safe answer"),
+      user("u4", "still streaming"),
+    ]);
+
+    expect(turns.map((turn) => turn.id)).toEqual(["u1", "u2", "u3"]);
+    expect(turns[0]?.messages).toEqual([
+      { role: "user", content: "real prompt" },
+      { role: "assistant", content: "calling a tool" },
+      { role: "assistant", content: "real answer" },
+    ]);
+    expect(turns[1]?.messages).toEqual([]);
+    expect(turns[2]?.messages[0]).toEqual({
+      role: "user",
+      content: "token [REDACTED]",
+    });
+  });
+
+  test("keeps turn positions stable when the transcript is compacted", () => {
+    const existing = mergeTurns(
+      [],
+      new Map(),
+      buildTranscriptTurns([user("u1", "one"), assistant("a1", "1")]),
+    );
+    const index = new Map([["u1", 0]]);
+    mergeTurns(
+      existing,
+      index,
+      buildTranscriptTurns([user("u2", "two"), assistant("a2", "2")]),
+    );
+    expect(existing.map((turn) => turn.id)).toEqual(["u1", "u2"]);
+  });
+});
 
 describe("OpenCode 2 request injection", () => {
   test("points the advisory directive at the recall helper", () => {
@@ -74,20 +139,23 @@ interface Harness {
   queries: string[];
   writes: Array<{ customId?: string; timeoutMs?: number; metadata?: Record<string, unknown> }>;
   adds: Array<{ content: string; customId?: string; metadata?: Record<string, unknown> }>;
+  sessions: Array<{ raw: string; offset: number; generation: number }>;
   emitted: Array<{ kind?: unknown; message?: unknown }>;
-  transcript: unknown[];
+  transcript: TranscriptMessage[];
 }
 
 function harness(
   config: Partial<V2RuntimeDependencies["config"]> = {},
+  apiVersion: "legacy" | "v5" = "legacy",
 ): Harness {
   const tools = new Map<string, FakeTool>();
   const hooks: Harness["hooks"] = {};
   const queries: string[] = [];
   const writes: Harness["writes"] = [];
   const adds: Harness["adds"] = [];
+  const sessions: Harness["sessions"] = [];
   const emitted: Harness["emitted"] = [];
-  const state: { transcript: unknown[] } = { transcript: [] };
+  const state: { transcript: TranscriptMessage[] } = { transcript: [] };
   const registration = { dispose: async () => undefined };
 
   const ctx = {
@@ -180,6 +248,13 @@ function harness(
       writes.push({ customId: options?.customId, timeoutMs: options?.timeoutMs, metadata });
       return { success: true };
     },
+    addSession: async (
+      _namespace: string,
+      raw: string,
+      options: { offset: number; generation: number },
+    ) => {
+      sessions.push({ raw, offset: options.offset, generation: options.generation });
+    },
     addMemory: async (
       content: string,
       _containerTag: string,
@@ -197,6 +272,7 @@ function harness(
     config: {
       recallMode: "direct",
       injectProfile: true,
+      captureEveryNTurns: 1,
       compactionEnabled: true,
       keywordPatterns: ["remember"],
       maxProjectMemories: 10,
@@ -211,6 +287,7 @@ function harness(
       latestVersion: "9.9.9",
       updateCommand: "bunx opencode-supermemory@latest install",
     }),
+    apiVersion: () => apiVersion,
   });
 
   return {
@@ -221,11 +298,12 @@ function harness(
     queries,
     writes,
     adds,
+    sessions,
     emitted,
     get transcript() {
       return state.transcript;
     },
-    set transcript(value: unknown[]) {
+    set transcript(value: TranscriptMessage[]) {
       state.transcript = value;
     },
   };
@@ -313,6 +391,149 @@ describe("OpenCode 2 runtime", () => {
     await h.runtime.handleContext({ sessionID: "s1", messages: [message] });
     expect(texts(message).at(-1)).toContain(SUPERMEMORY_RECALL_TOOL_NAME);
     expect(h.queries).toHaveLength(0);
+    h.runtime.cleanup();
+  });
+
+  test("captures completed turns idempotently and saves compaction summaries", async () => {
+    const h = harness();
+    await h.runtime.register();
+
+    h.transcript = [user("u1", "question 1"), assistant("a1", "answer 1")];
+    await h.runtime.handleEvent({
+      id: "e1",
+      type: "session.execution.succeeded",
+      data: { sessionID: "s1" },
+    });
+    await h.runtime.idle();
+    await h.runtime.handleEvent({
+      id: "e2",
+      type: "session.execution.succeeded",
+      data: { sessionID: "s1" },
+    });
+    await h.runtime.idle();
+    expect(h.writes).toHaveLength(1);
+    expect(h.writes[0]?.customId).toStartWith("opencode:capture:");
+    expect(h.writes[0]?.timeoutMs).toBe(3_000);
+    expect(h.writes[0]?.metadata).toMatchObject({
+      captureReason: "cadence",
+      sm_capture_mode: "automatic",
+    });
+
+    // Compaction truncates the transcript; the earlier turn keeps its slot.
+    h.transcript = [
+      { id: "c1", type: "compaction" },
+      user("u2", "question 2"),
+      assistant("a2", "answer 2"),
+    ];
+    await h.runtime.handleEvent({
+      id: "e3",
+      type: "session.execution.succeeded",
+      data: { sessionID: "s1" },
+    });
+    await h.runtime.idle();
+    expect(h.writes).toHaveLength(2);
+    expect(h.writes[1]?.customId).not.toBe(h.writes[0]?.customId);
+
+    const summary = "Summary ".repeat(20);
+    await h.runtime.handleEvent({
+      id: "e4",
+      type: "session.compaction.ended",
+      data: { sessionID: "s1", text: summary, reason: "auto" },
+    });
+    await h.runtime.handleEvent({
+      id: "e4",
+      type: "session.compaction.ended",
+      data: { sessionID: "s1", text: summary, reason: "auto" },
+    });
+    expect(h.adds).toHaveLength(1);
+    expect(h.adds[0]?.customId).toStartWith("opencode:compaction:");
+    expect(h.adds[0]?.metadata).toMatchObject({ sm_capture_mode: "compaction" });
+
+    const system: Array<{ type: "text"; text: string }> = [];
+    await h.runtime.handleCompaction({ sessionID: "s1", system });
+    expect(system[0]?.text).toContain(COMPACTION_CONTEXT_MARKER);
+    expect(system[0]?.text).toContain("Build: bun run build");
+
+    await h.runtime.handleEvent({
+      id: "e5",
+      type: "session.deleted",
+      data: { sessionID: "s1" },
+    });
+    expect(h.runtime.trackedSessionCount).toBe(0);
+    expect(h.writes).toHaveLength(2);
+    expect(h.emitted.filter((event) => event.kind === "saved")).toHaveLength(3);
+    h.runtime.cleanup();
+  });
+
+  test("v5 capture honors the cadence, strips private content, and flushes before compaction", async () => {
+    const h = harness({ captureEveryNTurns: 2 }, "v5");
+    await h.runtime.register();
+    const succeeded = async (id: string) => {
+      await h.runtime.handleEvent({
+        id,
+        type: "session.execution.succeeded",
+        data: { sessionID: "v5-cadence" },
+      });
+      await h.runtime.idle();
+    };
+
+    h.transcript = [user("u1", "deploy with <private>key abc</private> now"), assistant("a1", "done")];
+    await succeeded("v1");
+    expect(h.sessions).toHaveLength(0);
+
+    h.transcript = [
+      ...h.transcript,
+      user("u2", "<private>my password is hunter2</private>"),
+      assistant("a2", "noted hunter2"),
+      user("u3", "next"),
+      assistant("a3", "ok"),
+    ];
+    await succeeded("v2");
+    expect(h.sessions).toHaveLength(1);
+    expect(h.sessions[0]?.offset).toBe(0);
+    expect(h.sessions[0]?.raw).toContain("[REDACTED]");
+    expect(h.sessions[0]?.raw).not.toContain("key abc");
+    expect(h.sessions[0]?.raw).not.toContain("hunter2");
+    expect(h.sessions[0]?.raw).toContain("next");
+
+    h.transcript = [...h.transcript, user("u4", "one more"), assistant("a4", "sure")];
+    await h.runtime.handleCompaction({ sessionID: "v5-cadence", system: [] });
+    await h.runtime.idle();
+    expect(h.sessions).toHaveLength(2);
+    expect(h.sessions[1]?.offset).toBe(4);
+    expect(h.sessions[1]?.raw).toContain("one more");
+
+    h.transcript = [...h.transcript, user("u5", "last"), assistant("a5", "bye")];
+    await h.runtime.handleEvent({
+      id: "v3",
+      type: "session.deleted",
+      data: { sessionID: "v5-cadence" },
+    });
+    expect(h.sessions).toHaveLength(3);
+    expect(h.sessions[2]?.raw).toContain("last");
+    expect(h.writes).toHaveLength(0);
+    h.runtime.cleanup();
+  });
+
+  test("v5 capture waits for session end when the cadence is 0", async () => {
+    const h = harness({ captureEveryNTurns: 0 }, "v5");
+    await h.runtime.register();
+    h.transcript = [user("u1", "question"), assistant("a1", "answer")];
+    await h.runtime.handleEvent({
+      id: "z1",
+      type: "session.execution.succeeded",
+      data: { sessionID: "v5-end" },
+    });
+    await h.runtime.idle();
+    expect(h.sessions).toHaveLength(0);
+
+    await h.runtime.handleEvent({
+      id: "z2",
+      type: "session.deleted",
+      data: { sessionID: "v5-end" },
+    });
+    expect(h.sessions).toHaveLength(1);
+    expect(h.sessions[0]?.raw).toContain("question");
     h.runtime.cleanup();
   });
 

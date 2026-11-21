@@ -9,7 +9,9 @@ import {
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { getApiBaseUrl } from "../config.js";
 import { log as defaultLog } from "./logger.js";
+import { isFullyPrivate, stripPrivateContent } from "./privacy.js";
 
 export const SESSION_CAPTURE_TIMEOUT_MS = 25_000;
 
@@ -29,6 +31,7 @@ export interface SessionDelta {
   generation: number;
   offset: number;
   count: number;
+  completedTurns: number;
   commit: () => void;
 }
 
@@ -67,8 +70,16 @@ function sanitizeSegment(value: string): string {
   return value.replace(/[^a-zA-Z0-9._-]/g, "_");
 }
 
-function cursorPath(sessionId: string): string {
-  return join(sessionDir(), `${sanitizeSegment(sessionId)}.json`);
+// Keyed by destination too, so a send accepted by one backend or namespace never hides history from another.
+function cursorPath(sessionId: string, namespace: string): string {
+  const destination = createHash("sha256")
+    .update(`${getApiBaseUrl()}\n${namespace}`)
+    .digest("hex")
+    .slice(0, 16);
+  return join(
+    sessionDir(),
+    `${sanitizeSegment(sessionId)}.${destination}.json`,
+  );
 }
 
 function ensureDir(): void {
@@ -76,10 +87,13 @@ function ensureDir(): void {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 }
 
-export function readCursor(sessionId: string): SessionCursor {
+export function readCursor(
+  sessionId: string,
+  namespace: string,
+): SessionCursor {
   try {
     const cursor = JSON.parse(
-      readFileSync(cursorPath(sessionId), "utf8"),
+      readFileSync(cursorPath(sessionId, namespace), "utf8"),
     ) as Partial<SessionCursor>;
     if (
       typeof cursor.count === "number" &&
@@ -95,9 +109,13 @@ export function readCursor(sessionId: string): SessionCursor {
   return { count: 0, generation: 0, headHash: "" };
 }
 
-function writeCursor(sessionId: string, cursor: SessionCursor): void {
+function writeCursor(
+  sessionId: string,
+  namespace: string,
+  cursor: SessionCursor,
+): void {
   ensureDir();
-  const path = cursorPath(sessionId);
+  const path = cursorPath(sessionId, namespace);
   const temp = `${path}.${process.pid}.tmp`;
   writeFileSync(temp, JSON.stringify(cursor));
   renameSync(temp, path);
@@ -110,6 +128,79 @@ function messageId(message: unknown): string {
     if (typeof record.id === "string") return record.id;
   }
   return "";
+}
+
+interface TranscriptPart {
+  type?: string;
+  text?: unknown;
+  synthetic?: boolean;
+  ignored?: boolean;
+}
+
+interface TranscriptRecord {
+  info?: { role?: string; finish?: unknown; summary?: unknown };
+  role?: string;
+  type?: string;
+  text?: unknown;
+  finish?: unknown;
+  summary?: unknown;
+  parts?: TranscriptPart[];
+  content?: TranscriptPart[];
+}
+
+function asRecord(message: unknown): TranscriptRecord {
+  return message && typeof message === "object"
+    ? (message as TranscriptRecord)
+    : {};
+}
+
+function roleOf(message: TranscriptRecord): string {
+  return message.info?.role ?? message.role ?? message.type ?? "";
+}
+
+function promptText(message: TranscriptRecord): string {
+  const parts = message.parts ?? message.content;
+  if (!Array.isArray(parts)) {
+    return typeof message.text === "string" ? message.text : "";
+  }
+  return parts
+    .filter(
+      (part) =>
+        part?.type === "text" &&
+        part.synthetic !== true &&
+        part.ignored !== true &&
+        typeof part.text === "string",
+    )
+    .map((part) => part.text as string)
+    .join("\n");
+}
+
+function isFinalAssistant(message: TranscriptRecord): boolean {
+  const info = message.info ?? message;
+  return (
+    roleOf(message) === "assistant" &&
+    info.summary !== true &&
+    typeof info.finish === "string" &&
+    info.finish.length > 0 &&
+    info.finish !== "tool-calls"
+  );
+}
+
+// A fully private prompt hides its whole turn, as legacy capture did; the filter is prefix-stable so cursor counts stay valid.
+function withoutPrivateTurns(messages: readonly unknown[]): unknown[] {
+  let hidden = false;
+  return messages.filter((message) => {
+    const record = asRecord(message);
+    if (roleOf(record) === "user") {
+      const text = promptText(record).trim();
+      hidden = text.length > 0 && isFullyPrivate(text);
+    }
+    return !hidden;
+  });
+}
+
+function redactPrivate(_key: string, value: unknown): unknown {
+  return typeof value === "string" ? stripPrivateContent(value) : value;
 }
 
 function hashPrefix(ids: string[], count: number): string {
@@ -125,9 +216,11 @@ function hashPrefix(ids: string[], count: number): string {
 // history was rewritten, so the generation is bumped and the delta restarts at 0.
 export function buildSessionDelta(
   sessionId: string,
-  messages: readonly unknown[],
+  namespace: string,
+  transcript: readonly unknown[],
 ): SessionDelta | null {
-  const previous = readCursor(sessionId);
+  const messages = withoutPrivateTurns(transcript);
+  const previous = readCursor(sessionId, namespace);
   const ids = messages.map(messageId);
   let offset = previous.count;
   let generation = previous.generation;
@@ -143,9 +236,9 @@ export function buildSessionDelta(
 
   if (messages.length <= offset) return null;
 
-  const raw = `${messages
-    .slice(offset)
-    .map((message) => JSON.stringify(message))
+  const added = messages.slice(offset);
+  const raw = `${added
+    .map((message) => JSON.stringify(message, redactPrivate))
     .join("\n")}\n`;
   const count = messages.length;
   const headHash = hashPrefix(ids, count);
@@ -155,7 +248,10 @@ export function buildSessionDelta(
     generation,
     offset,
     count,
-    commit: () => writeCursor(sessionId, { count, generation, headHash }),
+    completedTurns: added.filter((message) => isFinalAssistant(asRecord(message)))
+      .length,
+    commit: () =>
+      writeCursor(sessionId, namespace, { count, generation, headHash }),
   };
 }
 
@@ -192,6 +288,7 @@ export async function captureSession(options: {
   metadata?: SessionMetadata;
   supportingContext?: string;
   timeoutMs?: number;
+  everyNTurns?: number;
   onSaved?: () => void;
   logger?: typeof defaultLog;
 }): Promise<boolean> {
@@ -199,8 +296,11 @@ export async function captureSession(options: {
   const logger = options.logger ?? defaultLog;
   if (!namespace) return false;
 
-  const delta = buildSessionDelta(sessionId, messages);
+  const delta = buildSessionDelta(sessionId, namespace, messages);
   if (!delta) return true;
+  if (options.everyNTurns && delta.completedTurns < options.everyNTurns) {
+    return true;
+  }
 
   try {
     await writer.addSession(namespace, delta.raw, {

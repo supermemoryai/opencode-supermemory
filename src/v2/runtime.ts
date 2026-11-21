@@ -3,12 +3,20 @@ import { createHash } from "node:crypto";
 import type { Plugin } from "@opencode/plugin";
 import type { SessionHooks } from "@opencode/plugin/promise/session";
 
-import { CONFIG, isConfigured, PLUGIN_VERSION } from "../config.js";
+import { CONFIG, getApiVersion, isConfigured, PLUGIN_VERSION } from "../config.js";
 import {
   createMemoryActivityReporterFromSink,
   type MemoryActivityNotice,
   type MemoryActivityReporter,
 } from "../services/activity.js";
+import {
+  AUTOMATIC_CAPTURE_TIMEOUT_MS,
+  buildCadenceBatches,
+  buildSessionEndBatch,
+  getCaptureId,
+  type CaptureBatch,
+  type CaptureTurn,
+} from "../services/capture.js";
 import { supermemoryClient, type SupermemoryClient } from "../services/client.js";
 import {
   captureSession,
@@ -36,6 +44,7 @@ import {
   type SupermemoryToolArgs,
 } from "../services/memory-tool.js";
 import { RECALL_PERMISSION } from "../services/opencode-permissions.js";
+import { isFullyPrivate, stripPrivateContent } from "../services/privacy.js";
 import {
   buildDirectRecallResult,
   buildRecallDirective,
@@ -59,7 +68,6 @@ const SYNTHETIC_METADATA_KEY = "supermemory";
 const UPDATE_COMMAND = "bunx opencode-supermemory@latest install";
 const MAX_DISPATCHES_PER_SESSION = 8;
 const MIN_SUMMARY_CHARS = 100;
-const SUMMARY_SAVE_TIMEOUT_MS = 3_000;
 const MAX_SUMMARY_ATTEMPTS = 5;
 const SUMMARY_RETRY_BASE_MS = 15_000;
 
@@ -105,6 +113,7 @@ export const SUPERMEMORY_RECALL_INPUT = {
 type RuntimeMemoryClient = Pick<
   SupermemoryClient,
   | "addMemory"
+  | "ingestConversation"
   | "addSession"
   | "getProfileScoped"
   | "searchMemoriesForRecall"
@@ -118,6 +127,7 @@ type RuntimeConfig = Pick<
   typeof CONFIG,
   | "recallMode"
   | "injectProfile"
+  | "captureEveryNTurns"
   | "compactionEnabled"
   | "keywordPatterns"
   | "maxProjectMemories"
@@ -132,6 +142,7 @@ export interface V2RuntimeDependencies {
   resolveTags: typeof getTags;
   logger: typeof log;
   checkUpdate: () => Promise<UpdateInfo | null>;
+  apiVersion: typeof getApiVersion;
 }
 
 const DEFAULT_DEPENDENCIES: V2RuntimeDependencies = {
@@ -143,6 +154,7 @@ const DEFAULT_DEPENDENCIES: V2RuntimeDependencies = {
   logger: log,
   checkUpdate: () =>
     checkNpmUpdate("opencode-supermemory", PLUGIN_VERSION, UPDATE_COMMAND),
+  apiVersion: getApiVersion,
 };
 
 /** Minimal shape of an OpenCode 2 event as read from `ctx.event.subscribe()`. */
@@ -150,6 +162,15 @@ export interface V2Event {
   id?: string;
   type: string;
   data?: Record<string, unknown>;
+}
+
+/** Minimal shape of a persisted OpenCode 2 transcript message. */
+export interface TranscriptMessage {
+  id: string;
+  type: string;
+  text?: string;
+  finish?: string;
+  content?: ReadonlyArray<{ type: string; text?: string }>;
 }
 
 interface Injection {
@@ -164,6 +185,9 @@ interface SessionState {
   injectedInitialContext: boolean;
   dispatches: Map<string, Promise<Injection>>;
   dispatchOrder: string[];
+  turns: CaptureTurn[];
+  turnIndex: Map<string, number>;
+  completedCaptureIds: Set<string>;
 }
 
 interface PendingSummary {
@@ -282,6 +306,105 @@ export function applyInjection(
     ) as RequestMessage;
     messages[index] = copy;
   }
+}
+
+function sanitizeCaptureText(text: string): string {
+  if (!text || isFullyPrivate(text)) return "";
+  return stripPrivateContent(text).trim();
+}
+
+function isFinalAssistant(message: TranscriptMessage): boolean {
+  return (
+    typeof message.finish === "string" &&
+    message.finish.length > 0 &&
+    message.finish !== "tool-calls"
+  );
+}
+
+function assistantText(message: TranscriptMessage): string {
+  return (message.content ?? [])
+    .filter((part) => part.type === "text" && typeof part.text === "string")
+    .map((part) => part.text as string)
+    .join("\n")
+    .trim();
+}
+
+/**
+ * Groups an OpenCode 2 transcript into completed user/assistant turns using
+ * the same rules as the V1 capture hook: synthetic and system messages are
+ * ignored, `<private>` content is redacted, and a fully private prompt hides
+ * its whole turn.
+ */
+export function buildTranscriptTurns(
+  messages: ReadonlyArray<TranscriptMessage>,
+): CaptureTurn[] {
+  const turns: CaptureTurn[] = [];
+  let current:
+    | {
+        id: string;
+        messages: CaptureTurn["messages"];
+        fullyPrivate: boolean;
+        complete: boolean;
+      }
+    | undefined;
+
+  const finish = () => {
+    if (current?.complete) {
+      turns.push({
+        id: current.id,
+        messages: current.fullyPrivate ? [] : current.messages,
+      });
+    }
+    current = undefined;
+  };
+
+  for (const message of messages) {
+    if (message.type === "user") {
+      finish();
+      const rawText = (message.text ?? "").trim();
+      const text = sanitizeCaptureText(rawText);
+      current = {
+        id: message.id,
+        messages: text ? [{ role: "user", content: text }] : [],
+        fullyPrivate: rawText.length > 0 && isFullyPrivate(rawText),
+        complete: false,
+      };
+      continue;
+    }
+
+    if (!current || message.type !== "assistant") continue;
+
+    const text = sanitizeCaptureText(assistantText(message));
+    if (text && !current.fullyPrivate) {
+      current.messages.push({ role: "assistant", content: text });
+    }
+    if (isFinalAssistant(message)) current.complete = true;
+  }
+
+  finish();
+  return turns;
+}
+
+/**
+ * Merges freshly read turns into the session's cumulative turn list. The
+ * transcript OpenCode returns may shrink after compaction, so turn positions
+ * (and therefore capture IDs) are anchored to the first time a turn was seen.
+ */
+export function mergeTurns(
+  existing: CaptureTurn[],
+  index: Map<string, number>,
+  incoming: CaptureTurn[],
+): CaptureTurn[] {
+  for (const turn of incoming) {
+    const position = index.get(turn.id);
+    if (position === undefined) {
+      index.set(turn.id, existing.length);
+      existing.push(turn);
+    } else {
+      existing[position] = turn;
+    }
+  }
+  return existing;
 }
 
 export class EventDeduper {
@@ -480,6 +603,7 @@ export class V2Runtime {
       hooks: ["session.context", "session.compaction", "permission.evaluate", "tool.execute"],
       activity: this.#emitActivity ? "rpc" : "log-only",
       recallMode: this.#deps.config.recallMode,
+      captureEveryNTurns: this.#deps.config.captureEveryNTurns,
       compactionEnabled: this.#deps.config.compactionEnabled,
     });
   }
@@ -583,7 +707,13 @@ export class V2Runtime {
     sessionID: string;
     system: Array<{ type: "text"; text: string }>;
   }): Promise<void> {
-    if (!this.#configured || !this.#deps.config.compactionEnabled) return;
+    if (!this.#configured) return;
+    if (this.#deps.apiVersion() === "v5") {
+      void this.#runCaptureExclusive(event.sessionID, () =>
+        this.#captureSession(event.sessionID),
+      );
+    }
+    if (!this.#deps.config.compactionEnabled) return;
     const memories = await this.#projectMemories(event.sessionID);
     event.system.push({ type: "text", text: createCompactionPrompt(memories) });
     this.#deps.logger("v2 compaction context injected", {
@@ -604,7 +734,7 @@ export class V2Runtime {
       case "session.execution.succeeded": {
         if (!sessionID) return;
         void this.#runCaptureExclusive(sessionID, () =>
-          this.#captureSession(sessionID),
+          this.#captureCadence(sessionID),
         );
         return;
       }
@@ -613,7 +743,7 @@ export class V2Runtime {
         if (!sessionID || event.data?.reason !== "shutdown") return;
         if (!this.#states.has(sessionID)) return;
         void this.#runCaptureExclusive(sessionID, () =>
-          this.#captureSession(sessionID),
+          this.#captureSessionEnd(sessionID),
         );
         return;
       }
@@ -624,7 +754,7 @@ export class V2Runtime {
         this.#recall.delete(sessionID);
         if (!state) return;
         await this.#runCaptureExclusive(sessionID, () =>
-          this.#captureSession(sessionID),
+          this.#captureSessionEnd(sessionID),
         );
         this.#states.delete(sessionID);
         return;
@@ -705,6 +835,9 @@ export class V2Runtime {
       injectedInitialContext: false,
       dispatches: new Map(),
       dispatchOrder: [],
+      turns: [],
+      turnIndex: new Map(),
+      completedCaptureIds: new Set(),
     };
     this.#states.set(sessionID, state);
     return state;
@@ -901,12 +1034,130 @@ export class V2Runtime {
     }
   }
 
-  async #sessionMessages(sessionID: string): Promise<unknown[]> {
-    const messages = (await this.#ctx.session.context({ sessionID })) as unknown;
-    return Array.isArray(messages) ? messages : [];
+  async #refreshTurns(sessionID: string, state: SessionState): Promise<CaptureTurn[]> {
+    try {
+      const messages = (await this.#ctx.session.context({ sessionID })) as unknown;
+      if (Array.isArray(messages)) {
+        mergeTurns(
+          state.turns,
+          state.turnIndex,
+          buildTranscriptTurns(messages as TranscriptMessage[]),
+        );
+      }
+    } catch (error) {
+      this.#deps.logger("v2 capture transcript read failed; using cached turns", {
+        sessionID,
+        error: String(error),
+      });
+    }
+    return state.turns;
   }
 
-  async #captureSession(sessionID: string): Promise<void> {
+  async #saveBatch(
+    sessionID: string,
+    state: SessionState,
+    batch: CaptureBatch,
+    reason: "cadence" | "session_end",
+  ): Promise<boolean> {
+    const captureId = getCaptureId(sessionID, batch);
+    if (state.completedCaptureIds.has(captureId)) return true;
+    const messages = batch.turns.flatMap((turn) => turn.messages);
+    if (messages.length === 0) {
+      state.completedCaptureIds.add(captureId);
+      return true;
+    }
+
+    let result: { success: boolean; error?: string };
+    try {
+      const tags = await this.#resolveSession(sessionID);
+      result = await this.#deps.memoryClient.ingestConversation(
+        `${sessionID}:${batch.startTurn}-${batch.endTurn}`,
+        messages,
+        [tags.canonical],
+        {
+          project: tags.projectName,
+          sm_project_id: tags.projectId,
+          sm_scope: "personal",
+          sm_capture_mode: "automatic",
+          captureReason: reason,
+          sessionId: sessionID,
+          turnStart: batch.startTurn,
+          turnEnd: batch.endTurn,
+        },
+        {
+          defaultEntityContext: AGENT_ENTITY_CONTEXT,
+          customId: captureId,
+          timeoutMs: AUTOMATIC_CAPTURE_TIMEOUT_MS,
+        },
+      );
+    } catch (error) {
+      result = {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+
+    if (result.success) {
+      state.completedCaptureIds.add(captureId);
+      this.#activity.saved();
+      this.#deps.logger("[capture] conversation batch saved", {
+        sessionID,
+        reason,
+        startTurn: batch.startTurn,
+        endTurn: batch.endTurn,
+      });
+      return true;
+    }
+
+    this.#deps.logger("[capture] failed to save conversation batch", {
+      sessionID,
+      reason,
+      startTurn: batch.startTurn,
+      endTurn: batch.endTurn,
+      error: result.error,
+    });
+    return false;
+  }
+
+  async #captureCadence(sessionID: string): Promise<void> {
+    const state = this.#state(sessionID);
+    if (this.#deps.apiVersion() === "v5") {
+      const everyNTurns = this.#deps.config.captureEveryNTurns;
+      if (everyNTurns > 0) await this.#captureSession(sessionID, everyNTurns);
+      return;
+    }
+    const turns = await this.#refreshTurns(sessionID, state);
+    for (const batch of buildCadenceBatches(
+      turns,
+      this.#deps.config.captureEveryNTurns,
+    )) {
+      await this.#saveBatch(sessionID, state, batch, "cadence");
+    }
+  }
+
+  async #captureSessionEnd(sessionID: string): Promise<void> {
+    if (this.#deps.apiVersion() === "v5") {
+      await this.#captureSession(sessionID);
+      return;
+    }
+    const state = this.#state(sessionID);
+    const turns = await this.#refreshTurns(sessionID, state);
+    for (const batch of buildCadenceBatches(
+      turns,
+      this.#deps.config.captureEveryNTurns,
+    )) {
+      await this.#saveBatch(sessionID, state, batch, "cadence");
+    }
+    const finalBatch = buildSessionEndBatch(
+      turns,
+      this.#deps.config.captureEveryNTurns,
+    );
+    if (finalBatch) {
+      await this.#saveBatch(sessionID, state, finalBatch, "session_end");
+    }
+  }
+
+  async #captureSession(sessionID: string, everyNTurns?: number): Promise<void> {
     this.#state(sessionID);
 
     let tags: ResolvedTags;
@@ -922,7 +1173,8 @@ export class V2Runtime {
 
     let messages: unknown[];
     try {
-      messages = await this.#sessionMessages(sessionID);
+      const context = (await this.#ctx.session.context({ sessionID })) as unknown;
+      messages = Array.isArray(context) ? context : [];
     } catch (error) {
       this.#deps.logger("v2 session transcript read failed", {
         sessionID,
@@ -939,6 +1191,7 @@ export class V2Runtime {
       metadata: sessionMetadata(tags.projectName, tags.projectId),
       supportingContext: AGENT_ENTITY_CONTEXT,
       timeoutMs: SESSION_CAPTURE_TIMEOUT_MS,
+      everyNTurns,
       onSaved: () => this.#activity.saved(),
       logger: this.#deps.logger,
     });
@@ -952,7 +1205,7 @@ export class V2Runtime {
     await Promise.all([
       ...sessions.map((sessionID) =>
         this.#runCaptureExclusive(sessionID, () =>
-          this.#captureSession(sessionID),
+          this.#captureSessionEnd(sessionID),
         ),
       ),
       ...[...pending].map((sessionID) =>
@@ -1026,7 +1279,7 @@ export class V2Runtime {
           {
             customId: summary.customId,
             entityContext: AGENT_ENTITY_CONTEXT,
-            timeoutMs: SUMMARY_SAVE_TIMEOUT_MS,
+            timeoutMs: AUTOMATIC_CAPTURE_TIMEOUT_MS,
           },
         );
         if (result.success) {
