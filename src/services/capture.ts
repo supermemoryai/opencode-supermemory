@@ -431,6 +431,7 @@ export function createSessionCaptureHook(
   const writer = options?.writer ?? supermemoryClient;
   const activeSessions = new Set<string>();
   const inFlight = new Map<string, Promise<void>>();
+  const snapshots = new Map<string, SessionMessage[]>();
 
   async function readMessages(sessionID: string): Promise<SessionMessage[]> {
     const response = await ctx.client.session.messages({
@@ -443,20 +444,31 @@ export function createSessionCaptureHook(
     return Array.isArray(response) ? response : (response.data ?? []);
   }
 
+  async function loadMessages(
+    sessionID: string,
+  ): Promise<SessionMessage[] | undefined> {
+    try {
+      const messages = await readMessages(sessionID);
+      snapshots.set(sessionID, messages);
+      return messages;
+    } catch (error) {
+      const cached = snapshots.get(sessionID);
+      log(
+        cached
+          ? "[capture] failed to read session transcript; using the last idle snapshot"
+          : "[capture] failed to read session transcript",
+        { sessionID, error: String(error) },
+      );
+      return cached;
+    }
+  }
+
   async function capture(
     sessionID: string,
     everyNTurns?: number,
   ): Promise<boolean> {
-    let messages: SessionMessage[];
-    try {
-      messages = await readMessages(sessionID);
-    } catch (error) {
-      log("[capture] failed to read session transcript", {
-        sessionID,
-        error: String(error),
-      });
-      return false;
-    }
+    const messages = await loadMessages(sessionID);
+    if (!messages) return false;
     return captureSession({
       writer,
       namespace: tags.canonical,
@@ -487,6 +499,11 @@ export function createSessionCaptureHook(
     }
   }
 
+  function finish(sessionID: string): void {
+    activeSessions.delete(sessionID);
+    snapshots.delete(sessionID);
+  }
+
   return {
     async event({ event }: { event: { type: string; properties?: unknown } }) {
       const props = event.properties as Record<string, unknown> | undefined;
@@ -501,9 +518,12 @@ export function createSessionCaptureHook(
         const sessionID = props?.sessionID as string | undefined;
         if (!sessionID) return;
         activeSessions.add(sessionID);
-        if (captureEveryNTurns <= 0) return;
         await runExclusive(sessionID, async () => {
-          await capture(sessionID, captureEveryNTurns);
+          if (captureEveryNTurns > 0) {
+            await capture(sessionID, captureEveryNTurns);
+          } else {
+            await loadMessages(sessionID);
+          }
         });
         return;
       }
@@ -513,7 +533,7 @@ export function createSessionCaptureHook(
         if (!sessionID) return;
         activeSessions.add(sessionID);
         await runExclusive(sessionID, async () => {
-          if (await capture(sessionID)) activeSessions.delete(sessionID);
+          if (await capture(sessionID)) finish(sessionID);
         });
         return;
       }
@@ -522,7 +542,7 @@ export function createSessionCaptureHook(
         await Promise.all(
           [...activeSessions].map((sessionID) =>
             runExclusive(sessionID, async () => {
-              if (await capture(sessionID)) activeSessions.delete(sessionID);
+              if (await capture(sessionID)) finish(sessionID);
             }),
           ),
         );

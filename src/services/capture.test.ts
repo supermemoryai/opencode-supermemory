@@ -338,4 +338,47 @@ describe("v5 session capture", () => {
     expect(sent[1]?.offset).toBe(4);
     expect(sent[1]?.raw).toContain("question 3");
   });
+
+  test("sends a deleted session from its last idle snapshot when the cadence is 0", async () => {
+    process.env.SUPERMEMORY_SESSION_DIR = mkdtempSync(join(tmpdir(), "sm-v1-session-"));
+    let deleted = false;
+    const sent: Array<{ raw: string; offset: number }> = [];
+    const ctx = {
+      directory: "/repo",
+      client: {
+        session: {
+          messages: async () => ({ data: deleted ? undefined : conversation(2) }),
+        },
+      },
+    };
+    const tags: ResolvedTags = {
+      canonical: "repo_test__0123456789abcdef",
+      user: "repo_test__0123456789abcdef",
+      project: "repo_test__0123456789abcdef",
+      projectId: "0123456789abcdef",
+      projectName: "test",
+      personalReads: [],
+      projectReads: [],
+      allReads: [],
+    };
+    const hook = createSessionCaptureHook(ctx, tags, {
+      captureEveryNTurns: 0,
+      writer: {
+        addSession: async (_namespace, raw, options) => {
+          sent.push({ raw, offset: options.offset });
+        },
+      },
+    });
+
+    await hook.event({ event: { type: "session.idle", properties: { sessionID: "session-2" } } });
+    expect(sent).toHaveLength(0);
+
+    deleted = true;
+    await hook.event({
+      event: { type: "session.deleted", properties: { info: { id: "session-2" } } },
+    });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.offset).toBe(0);
+    expect(sent[0]?.raw).toContain("question 2");
+  });
 });

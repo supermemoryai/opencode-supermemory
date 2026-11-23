@@ -537,6 +537,31 @@ describe("OpenCode 2 runtime", () => {
     h.runtime.cleanup();
   });
 
+  test("v5 capture sends a deleted session from its last snapshot", async () => {
+    const h = harness({ captureEveryNTurns: 0 }, "v5");
+    await h.runtime.register();
+    h.transcript = [user("u1", "question"), assistant("a1", "answer")];
+    await h.runtime.handleEvent({
+      id: "y1",
+      type: "session.execution.succeeded",
+      data: { sessionID: "v5-gone" },
+    });
+    await h.runtime.idle();
+    expect(h.sessions).toHaveLength(0);
+
+    h.ctx.session.context = async () => {
+      throw new Error("session not found");
+    };
+    await h.runtime.handleEvent({
+      id: "y2",
+      type: "session.deleted",
+      data: { sessionID: "v5-gone" },
+    });
+    expect(h.sessions).toHaveLength(1);
+    expect(h.sessions[0]?.raw).toContain("question");
+    h.runtime.cleanup();
+  });
+
   test("reports tool-driven recall activity", async () => {
     const h = harness();
     await h.runtime.register();

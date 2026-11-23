@@ -188,6 +188,7 @@ interface SessionState {
   turns: CaptureTurn[];
   turnIndex: Map<string, number>;
   completedCaptureIds: Set<string>;
+  messages?: unknown[];
 }
 
 interface PendingSummary {
@@ -1124,6 +1125,7 @@ export class V2Runtime {
     if (this.#deps.apiVersion() === "v5") {
       const everyNTurns = this.#deps.config.captureEveryNTurns;
       if (everyNTurns > 0) await this.#captureSession(sessionID, everyNTurns);
+      else await this.#readSession(sessionID);
       return;
     }
     const turns = await this.#refreshTurns(sessionID, state);
@@ -1157,8 +1159,10 @@ export class V2Runtime {
     }
   }
 
-  async #captureSession(sessionID: string, everyNTurns?: number): Promise<void> {
-    this.#state(sessionID);
+  async #readSession(
+    sessionID: string,
+  ): Promise<{ tags: ResolvedTags; messages: unknown[] } | undefined> {
+    const state = this.#state(sessionID);
 
     let tags: ResolvedTags;
     try {
@@ -1168,20 +1172,28 @@ export class V2Runtime {
         sessionID,
         error: String(error),
       });
-      return;
+      return undefined;
     }
 
-    let messages: unknown[];
     try {
       const context = (await this.#ctx.session.context({ sessionID })) as unknown;
-      messages = Array.isArray(context) ? context : [];
+      state.messages = Array.isArray(context) ? context : [];
     } catch (error) {
-      this.#deps.logger("v2 session transcript read failed", {
-        sessionID,
-        error: String(error),
-      });
-      return;
+      this.#deps.logger(
+        state.messages
+          ? "v2 session transcript read failed; using the last snapshot"
+          : "v2 session transcript read failed",
+        { sessionID, error: String(error) },
+      );
+      if (!state.messages) return undefined;
     }
+    return { tags, messages: state.messages };
+  }
+
+  async #captureSession(sessionID: string, everyNTurns?: number): Promise<void> {
+    const session = await this.#readSession(sessionID);
+    if (!session) return;
+    const { tags, messages } = session;
 
     await captureSession({
       writer: this.#deps.memoryClient,
