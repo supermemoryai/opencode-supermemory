@@ -1,4 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { COMPACTION_CONTEXT_MARKER } from "../services/compaction-prompt.js";
 import { executeSupermemoryTool } from "../services/memory-tool.js";
@@ -17,6 +20,10 @@ import {
   type V2Context,
   type V2RuntimeDependencies,
 } from "./runtime.js";
+
+beforeEach(() => {
+  process.env.SUPERMEMORY_SESSION_DIR = mkdtempSync(join(tmpdir(), "sm-v2-session-"));
+});
 
 const tags: ResolvedTags = {
   canonical: "repo_test__0123456789abcdef",
@@ -132,18 +139,21 @@ interface Harness {
   queries: string[];
   writes: Array<{ customId?: string; timeoutMs?: number; metadata?: Record<string, unknown> }>;
   adds: Array<{ content: string; customId?: string; metadata?: Record<string, unknown> }>;
+  sessions: Array<{ raw: string; offset: number; generation: number }>;
   emitted: Array<{ kind?: unknown; message?: unknown }>;
   transcript: TranscriptMessage[];
 }
 
 function harness(
   config: Partial<V2RuntimeDependencies["config"]> = {},
+  apiVersion: "legacy" | "v5" = "legacy",
 ): Harness {
   const tools = new Map<string, FakeTool>();
   const hooks: Harness["hooks"] = {};
   const queries: string[] = [];
   const writes: Harness["writes"] = [];
   const adds: Harness["adds"] = [];
+  const sessions: Harness["sessions"] = [];
   const emitted: Harness["emitted"] = [];
   const state: { transcript: TranscriptMessage[] } = { transcript: [] };
   const registration = { dispose: async () => undefined };
@@ -238,6 +248,13 @@ function harness(
       writes.push({ customId: options?.customId, timeoutMs: options?.timeoutMs, metadata });
       return { success: true };
     },
+    addSession: async (
+      _namespace: string,
+      raw: string,
+      options: { offset: number; generation: number },
+    ) => {
+      sessions.push({ raw, offset: options.offset, generation: options.generation });
+    },
     addMemory: async (
       content: string,
       _containerTag: string,
@@ -270,6 +287,7 @@ function harness(
       latestVersion: "9.9.9",
       updateCommand: "bunx opencode-supermemory@latest install",
     }),
+    apiVersion: () => apiVersion,
   });
 
   return {
@@ -280,6 +298,7 @@ function harness(
     queries,
     writes,
     adds,
+    sessions,
     emitted,
     get transcript() {
       return state.transcript;
@@ -443,6 +462,103 @@ describe("OpenCode 2 runtime", () => {
     expect(h.runtime.trackedSessionCount).toBe(0);
     expect(h.writes).toHaveLength(2);
     expect(h.emitted.filter((event) => event.kind === "saved")).toHaveLength(3);
+    h.runtime.cleanup();
+  });
+
+  test("v5 capture honors the cadence, strips private content, and flushes before compaction", async () => {
+    const h = harness({ captureEveryNTurns: 2 }, "v5");
+    await h.runtime.register();
+    const succeeded = async (id: string) => {
+      await h.runtime.handleEvent({
+        id,
+        type: "session.execution.succeeded",
+        data: { sessionID: "v5-cadence" },
+      });
+      await h.runtime.idle();
+    };
+
+    h.transcript = [user("u1", "deploy with <private>key abc</private> now"), assistant("a1", "done")];
+    await succeeded("v1");
+    expect(h.sessions).toHaveLength(0);
+
+    h.transcript = [
+      ...h.transcript,
+      user("u2", "<private>my password is hunter2</private>"),
+      assistant("a2", "noted hunter2"),
+      user("u3", "next"),
+      assistant("a3", "ok"),
+    ];
+    await succeeded("v2");
+    expect(h.sessions).toHaveLength(1);
+    expect(h.sessions[0]?.offset).toBe(0);
+    expect(h.sessions[0]?.raw).toContain("[REDACTED]");
+    expect(h.sessions[0]?.raw).not.toContain("key abc");
+    expect(h.sessions[0]?.raw).not.toContain("hunter2");
+    expect(h.sessions[0]?.raw).toContain("next");
+
+    h.transcript = [...h.transcript, user("u4", "one more"), assistant("a4", "sure")];
+    await h.runtime.handleCompaction({ sessionID: "v5-cadence", system: [] });
+    await h.runtime.idle();
+    expect(h.sessions).toHaveLength(2);
+    expect(h.sessions[1]?.offset).toBe(4);
+    expect(h.sessions[1]?.raw).toContain("one more");
+
+    h.transcript = [...h.transcript, user("u5", "last"), assistant("a5", "bye")];
+    await h.runtime.handleEvent({
+      id: "v3",
+      type: "session.deleted",
+      data: { sessionID: "v5-cadence" },
+    });
+    expect(h.sessions).toHaveLength(3);
+    expect(h.sessions[2]?.raw).toContain("last");
+    expect(h.writes).toHaveLength(0);
+    h.runtime.cleanup();
+  });
+
+  test("v5 capture waits for session end when the cadence is 0", async () => {
+    const h = harness({ captureEveryNTurns: 0 }, "v5");
+    await h.runtime.register();
+    h.transcript = [user("u1", "question"), assistant("a1", "answer")];
+    await h.runtime.handleEvent({
+      id: "z1",
+      type: "session.execution.succeeded",
+      data: { sessionID: "v5-end" },
+    });
+    await h.runtime.idle();
+    expect(h.sessions).toHaveLength(0);
+
+    await h.runtime.handleEvent({
+      id: "z2",
+      type: "session.deleted",
+      data: { sessionID: "v5-end" },
+    });
+    expect(h.sessions).toHaveLength(1);
+    expect(h.sessions[0]?.raw).toContain("question");
+    h.runtime.cleanup();
+  });
+
+  test("v5 capture sends a deleted session from its last snapshot", async () => {
+    const h = harness({ captureEveryNTurns: 0 }, "v5");
+    await h.runtime.register();
+    h.transcript = [user("u1", "question"), assistant("a1", "answer")];
+    await h.runtime.handleEvent({
+      id: "y1",
+      type: "session.execution.succeeded",
+      data: { sessionID: "v5-gone" },
+    });
+    await h.runtime.idle();
+    expect(h.sessions).toHaveLength(0);
+
+    h.ctx.session.context = async () => {
+      throw new Error("session not found");
+    };
+    await h.runtime.handleEvent({
+      id: "y2",
+      type: "session.deleted",
+      data: { sessionID: "v5-gone" },
+    });
+    expect(h.sessions).toHaveLength(1);
+    expect(h.sessions[0]?.raw).toContain("question");
     h.runtime.cleanup();
   });
 

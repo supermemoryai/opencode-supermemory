@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import type { Plugin } from "@opencode/plugin";
 import type { SessionHooks } from "@opencode/plugin/promise/session";
 
-import { CONFIG, isConfigured, PLUGIN_VERSION } from "../config.js";
+import { CONFIG, getApiVersion, isConfigured, PLUGIN_VERSION } from "../config.js";
 import {
   createMemoryActivityReporterFromSink,
   type MemoryActivityNotice,
@@ -18,6 +18,12 @@ import {
   type CaptureTurn,
 } from "../services/capture.js";
 import { supermemoryClient, type SupermemoryClient } from "../services/client.js";
+import {
+  captureSession,
+  holdExitUntilSettled,
+  SESSION_CAPTURE_TIMEOUT_MS,
+  sessionMetadata,
+} from "../services/session.js";
 import {
   createCompactionPrompt,
   fitProjectMemories,
@@ -108,6 +114,7 @@ type RuntimeMemoryClient = Pick<
   SupermemoryClient,
   | "addMemory"
   | "ingestConversation"
+  | "addSession"
   | "getProfileScoped"
   | "searchMemoriesForRecall"
   | "searchMemoriesScoped"
@@ -135,6 +142,7 @@ export interface V2RuntimeDependencies {
   resolveTags: typeof getTags;
   logger: typeof log;
   checkUpdate: () => Promise<UpdateInfo | null>;
+  apiVersion: typeof getApiVersion;
 }
 
 const DEFAULT_DEPENDENCIES: V2RuntimeDependencies = {
@@ -146,6 +154,7 @@ const DEFAULT_DEPENDENCIES: V2RuntimeDependencies = {
   logger: log,
   checkUpdate: () =>
     checkNpmUpdate("opencode-supermemory", PLUGIN_VERSION, UPDATE_COMMAND),
+  apiVersion: getApiVersion,
 };
 
 /** Minimal shape of an OpenCode 2 event as read from `ctx.event.subscribe()`. */
@@ -179,6 +188,7 @@ interface SessionState {
   turns: CaptureTurn[];
   turnIndex: Map<string, number>;
   completedCaptureIds: Set<string>;
+  messages?: unknown[];
 }
 
 interface PendingSummary {
@@ -698,7 +708,13 @@ export class V2Runtime {
     sessionID: string;
     system: Array<{ type: "text"; text: string }>;
   }): Promise<void> {
-    if (!this.#configured || !this.#deps.config.compactionEnabled) return;
+    if (!this.#configured) return;
+    if (this.#deps.apiVersion() === "v5") {
+      void this.#runCaptureExclusive(event.sessionID, () =>
+        this.#captureSession(event.sessionID),
+      );
+    }
+    if (!this.#deps.config.compactionEnabled) return;
     const memories = await this.#projectMemories(event.sessionID);
     event.system.push({ type: "text", text: createCompactionPrompt(memories) });
     this.#deps.logger("v2 compaction context injected", {
@@ -1106,6 +1122,12 @@ export class V2Runtime {
 
   async #captureCadence(sessionID: string): Promise<void> {
     const state = this.#state(sessionID);
+    if (this.#deps.apiVersion() === "v5") {
+      const everyNTurns = this.#deps.config.captureEveryNTurns;
+      if (everyNTurns > 0) await this.#captureSession(sessionID, everyNTurns);
+      else await this.#readSession(sessionID);
+      return;
+    }
     const turns = await this.#refreshTurns(sessionID, state);
     for (const batch of buildCadenceBatches(
       turns,
@@ -1116,6 +1138,10 @@ export class V2Runtime {
   }
 
   async #captureSessionEnd(sessionID: string): Promise<void> {
+    if (this.#deps.apiVersion() === "v5") {
+      await this.#captureSession(sessionID);
+      return;
+    }
     const state = this.#state(sessionID);
     const turns = await this.#refreshTurns(sessionID, state);
     for (const batch of buildCadenceBatches(
@@ -1131,6 +1157,56 @@ export class V2Runtime {
     if (finalBatch) {
       await this.#saveBatch(sessionID, state, finalBatch, "session_end");
     }
+  }
+
+  async #readSession(
+    sessionID: string,
+  ): Promise<{ tags: ResolvedTags; messages: unknown[] } | undefined> {
+    const state = this.#state(sessionID);
+
+    let tags: ResolvedTags;
+    try {
+      tags = await this.#resolveSession(sessionID);
+    } catch (error) {
+      this.#deps.logger("v2 session capture skipped; no session directory", {
+        sessionID,
+        error: String(error),
+      });
+      return undefined;
+    }
+
+    try {
+      const context = (await this.#ctx.session.context({ sessionID })) as unknown;
+      state.messages = Array.isArray(context) ? context : [];
+    } catch (error) {
+      this.#deps.logger(
+        state.messages
+          ? "v2 session transcript read failed; using the last snapshot"
+          : "v2 session transcript read failed",
+        { sessionID, error: String(error) },
+      );
+      if (!state.messages) return undefined;
+    }
+    return { tags, messages: state.messages };
+  }
+
+  async #captureSession(sessionID: string, everyNTurns?: number): Promise<void> {
+    const session = await this.#readSession(sessionID);
+    if (!session) return;
+    const { tags, messages } = session;
+
+    await captureSession({
+      writer: this.#deps.memoryClient,
+      namespace: tags.canonical,
+      sessionId: sessionID,
+      messages,
+      metadata: sessionMetadata(tags.projectName, tags.projectId),
+      supportingContext: AGENT_ENTITY_CONTEXT,
+      timeoutMs: SESSION_CAPTURE_TIMEOUT_MS,
+      everyNTurns,
+      onSaved: () => this.#activity.saved(),
+      logger: this.#deps.logger,
+    });
   }
 
   async #flushAll(allowInactive = false): Promise<void> {
@@ -1157,6 +1233,7 @@ export class V2Runtime {
     const previous = this.#captureInFlight.get(sessionID) ?? Promise.resolve();
     const next = previous.catch(() => undefined).then(task);
     this.#captureInFlight.set(sessionID, next);
+    holdExitUntilSettled(next);
     try {
       await next;
     } catch (error) {
