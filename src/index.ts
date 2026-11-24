@@ -124,7 +124,10 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
       })
     : null;
   const captureHook = ctx.client
-    ? createCaptureHook(ctx, tags, { onSaved: () => activity.saved() })
+    ? createCaptureHook(ctx, tags, {
+        onSaved: () => activity.saved(),
+        onCaptureWarning: (message) => activity.captureWarning(message),
+      })
     : null;
 
   return {

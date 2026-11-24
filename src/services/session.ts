@@ -20,19 +20,28 @@ function sessionDir(): string {
   return override || join(homedir(), ".supermemory-opencode", "session");
 }
 
+export interface SkippedRange {
+  generation: number;
+  offset: number;
+  end: number;
+  reason: string;
+}
+
 export interface SessionCursor {
   count: number;
   generation: number;
   headHash: string;
+  skipped?: SkippedRange[];
 }
 
-export interface SessionDelta {
+export interface SessionChunk {
   raw: string;
   generation: number;
   offset: number;
   count: number;
+  truncatedBytes: number;
   completedTurns: number;
-  commit: () => void;
+  commit: (skipReason?: string) => void;
 }
 
 export type SessionMetadata = Record<string, string | number>;
@@ -103,6 +112,7 @@ export function readCursor(
         count: cursor.count,
         generation: cursor.generation,
         headHash: typeof cursor.headHash === "string" ? cursor.headHash : "",
+        ...(Array.isArray(cursor.skipped) ? { skipped: cursor.skipped } : {}),
       };
     }
   } catch {}
@@ -210,15 +220,44 @@ function hashPrefix(ids: string[], count: number): string {
     .digest("hex");
 }
 
+const MAX_CHUNK_BYTES = 256 * 1024;
+const MAX_RECORD_STRING_CHARS = 16 * 1024;
+const MAX_SKIPPED_RANGES = 20;
+const MIN_REQUEST_MS = 1_000;
+const REJECTED_STATUSES = new Set([400, 413, 415, 422]);
+
+function truncateLongStrings(_key: string, value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const text = stripPrivateContent(value);
+  return text.length > MAX_RECORD_STRING_CHARS
+    ? `${text.slice(0, MAX_RECORD_STRING_CHARS)}…[truncated ${text.length - MAX_RECORD_STRING_CHARS} chars]`
+    : text;
+}
+
+// A message too big for one request keeps its JSON shape with long strings cut, so the turn is still captured.
+function fitMessage(message: unknown): { text: string; truncatedBytes: number } {
+  const text = JSON.stringify(message, redactPrivate);
+  const bytes = Buffer.byteLength(text);
+  if (bytes <= MAX_CHUNK_BYTES) return { text, truncatedBytes: 0 };
+  const cut = JSON.stringify(message, truncateLongStrings);
+  return { text: cut, truncatedBytes: bytes - Buffer.byteLength(cut) };
+}
+
+function formatBytes(bytes: number): string {
+  return bytes >= 1024 * 1024
+    ? `${(bytes / 1024 / 1024).toFixed(1)} MB`
+    : `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
 // OpenCode has no append-only transcript file: the host returns the whole
 // message history each call and compaction rewrites its head. The message count
 // is the append offset; a shorter list or a changed already-sent prefix means the
 // history was rewritten, so the generation is bumped and the delta restarts at 0.
-export function buildSessionDelta(
+export function buildSessionChunks(
   sessionId: string,
   namespace: string,
   transcript: readonly unknown[],
-): SessionDelta | null {
+): SessionChunk[] {
   const messages = withoutPrivateTurns(transcript);
   const previous = readCursor(sessionId, namespace);
   const ids = messages.map(messageId);
@@ -234,25 +273,54 @@ export function buildSessionDelta(
     generation = previous.generation + 1;
   }
 
-  if (messages.length <= offset) return null;
-
-  const added = messages.slice(offset);
-  const raw = `${added
-    .map((message) => JSON.stringify(message, redactPrivate))
-    .join("\n")}\n`;
-  const count = messages.length;
-  const headHash = hashPrefix(ids, count);
-
-  return {
-    raw,
-    generation,
-    offset,
-    count,
-    completedTurns: added.filter((message) => isFinalAssistant(asRecord(message)))
-      .length,
-    commit: () =>
-      writeCursor(sessionId, namespace, { count, generation, headHash }),
+  const skipped = [...(previous.skipped ?? [])];
+  const chunks: SessionChunk[] = [];
+  const pushChunk = (start: number, end: number, lines: string[], truncatedBytes: number) => {
+    const headHash = hashPrefix(ids, end);
+    chunks.push({
+      raw: `${lines.join("\n")}\n`,
+      generation,
+      offset: start,
+      count: end,
+      truncatedBytes,
+      completedTurns: messages
+        .slice(start, end)
+        .filter((message) => isFinalAssistant(asRecord(message))).length,
+      commit: (skipReason) => {
+        if (skipReason) {
+          skipped.push({ generation, offset: start, end, reason: skipReason });
+          skipped.splice(0, Math.max(0, skipped.length - MAX_SKIPPED_RANGES));
+        }
+        writeCursor(sessionId, namespace, {
+          count: end,
+          generation,
+          headHash,
+          ...(skipped.length > 0 ? { skipped } : {}),
+        });
+      },
+    });
   };
+
+  let chunkStart = offset;
+  let lines: string[] = [];
+  let bytes = 0;
+  let truncated = 0;
+  for (let index = offset; index < messages.length; index++) {
+    const kept = fitMessage(messages[index]);
+    const size = Buffer.byteLength(kept.text) + 1;
+    if (lines.length > 0 && bytes + size > MAX_CHUNK_BYTES) {
+      pushChunk(chunkStart, index, lines, truncated);
+      chunkStart = index;
+      lines = [];
+      bytes = 0;
+      truncated = 0;
+    }
+    lines.push(kept.text);
+    bytes += size;
+    truncated += kept.truncatedBytes;
+  }
+  if (lines.length > 0) pushChunk(chunkStart, messages.length, lines, truncated);
+  return chunks;
 }
 
 const pendingCaptures = new Set<Promise<void>>();
@@ -290,45 +358,89 @@ export async function captureSession(options: {
   timeoutMs?: number;
   everyNTurns?: number;
   onSaved?: () => void;
+  onCaptureWarning?: (message: string) => void;
   logger?: typeof defaultLog;
 }): Promise<boolean> {
   const { writer, namespace, sessionId, messages } = options;
   const logger = options.logger ?? defaultLog;
   if (!namespace) return false;
 
-  const delta = buildSessionDelta(sessionId, namespace, messages);
-  if (!delta) return true;
-  if (options.everyNTurns && delta.completedTurns < options.everyNTurns) {
-    return true;
+  const chunks = buildSessionChunks(sessionId, namespace, messages);
+  if (chunks.length === 0) return true;
+  const completedTurns = chunks.reduce((sum, chunk) => sum + chunk.completedTurns, 0);
+  if (options.everyNTurns && completedTurns < options.everyNTurns) return true;
+
+  const deadline = Date.now() + (options.timeoutMs ?? SESSION_CAPTURE_TIMEOUT_MS);
+  let sent = 0;
+  let skippedBytes = 0;
+  let truncatedBytes = 0;
+  let complete = true;
+  const skipReasons = new Set<string>();
+  for (const chunk of chunks) {
+    const remaining = deadline - Date.now();
+    if (remaining < MIN_REQUEST_MS) {
+      complete = false;
+      break;
+    }
+    try {
+      await writer.addSession(namespace, chunk.raw, {
+        sessionId,
+        generation: chunk.generation,
+        offset: chunk.offset,
+        metadata: options.metadata,
+        supportingContext: options.supportingContext,
+        timeoutMs: remaining,
+      });
+    } catch (error) {
+      const status = (error as { status?: unknown } | null)?.status;
+      if (typeof status === "number" && REJECTED_STATUSES.has(status)) {
+        const bytes = Buffer.byteLength(chunk.raw);
+        chunk.commit(`server rejected ${formatBytes(bytes)} with HTTP ${status}`);
+        skippedBytes += bytes;
+        skipReasons.add(`HTTP ${status}`);
+        logger("[session] chunk rejected and skipped", {
+          sessionId,
+          generation: chunk.generation,
+          offset: chunk.offset,
+          count: chunk.count,
+          status,
+        });
+        continue;
+      }
+      logger("[session] failed to send session chunk; cursor left at this chunk", {
+        sessionId,
+        generation: chunk.generation,
+        offset: chunk.offset,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      complete = false;
+      break;
+    }
+    chunk.commit();
+    sent++;
+    truncatedBytes += chunk.truncatedBytes;
   }
 
-  try {
-    await writer.addSession(namespace, delta.raw, {
+  if (sent > 0) options.onSaved?.();
+  const warning = [
+    truncatedBytes > 0
+      ? `trimmed ${formatBytes(truncatedBytes)} of oversized tool output`
+      : "",
+    skippedBytes > 0
+      ? `skipped ${formatBytes(skippedBytes)} of this session (${[...skipReasons].join(", ")}); ranges listed in ~/.supermemory-opencode/session`
+      : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  if (warning) options.onCaptureWarning?.(warning);
+  if (sent > 0 || skippedBytes > 0) {
+    logger("[session] session sent", {
       sessionId,
-      generation: delta.generation,
-      offset: delta.offset,
-      metadata: options.metadata,
-      supportingContext: options.supportingContext,
-      timeoutMs: options.timeoutMs ?? SESSION_CAPTURE_TIMEOUT_MS,
+      chunks: chunks.length,
+      sent,
+      skippedBytes,
+      truncatedBytes,
     });
-  } catch (error) {
-    logger("[session] failed to send session session", {
-      sessionId,
-      generation: delta.generation,
-      offset: delta.offset,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return false;
   }
-
-  delta.commit();
-  options.onSaved?.();
-  logger("[session] session session sent", {
-    sessionId,
-    generation: delta.generation,
-    offset: delta.offset,
-    count: delta.count,
-    bytes: delta.raw.length,
-  });
-  return true;
+  return complete;
 }

@@ -75,6 +75,7 @@ export interface CaptureOptions {
   memoryClient?: ConversationWriter;
   writer?: SessionWriter;
   onSaved?: () => void;
+  onCaptureWarning?: (message: string) => void;
 }
 
 function extractText(parts: Part[] | undefined): string {
@@ -479,6 +480,7 @@ export function createSessionCaptureHook(
       timeoutMs: SESSION_CAPTURE_TIMEOUT_MS,
       everyNTurns,
       onSaved: options?.onSaved,
+      onCaptureWarning: options?.onCaptureWarning,
     });
   }
 
