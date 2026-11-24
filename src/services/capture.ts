@@ -1,13 +1,20 @@
 import { createHash } from "node:crypto";
 import type { Part } from "@opencode-ai/sdk";
 
-import { CONFIG, getDedupeScope } from "../config.js";
+import { CONFIG, getApiVersion, getDedupeScope } from "../config.js";
 import type { ConversationMessage } from "../types/index.js";
 import { supermemoryClient } from "./client.js";
 import { AGENT_ENTITY_CONTEXT } from "./entity-context.js";
 import { OpeningPromptIndex } from "./local-dedupe.js";
 import { log } from "./logger.js";
 import { isFullyPrivate, stripPrivateContent } from "./privacy.js";
+import {
+  captureSession,
+  holdExitUntilSettled,
+  SESSION_CAPTURE_TIMEOUT_MS,
+  sessionMetadata,
+  type SessionWriter,
+} from "./session.js";
 import type { ResolvedTags } from "./tags.js";
 
 export const AUTOMATIC_CAPTURE_TIMEOUT_MS = 3_000;
@@ -67,6 +74,7 @@ interface ConversationWriter {
 export interface CaptureOptions {
   captureEveryNTurns?: number;
   memoryClient?: ConversationWriter;
+  writer?: SessionWriter;
   onSaved?: () => void;
   openingPrompts?: OpeningPromptIndex | null;
 }
@@ -227,7 +235,7 @@ export function getCaptureId(
   return `opencode:capture:${digest}`;
 }
 
-export function createCaptureHook(
+export function createLegacyCaptureHook(
   ctx: CaptureContext,
   tags: ResolvedTags,
   options?: CaptureOptions,
@@ -437,6 +445,158 @@ export function createCaptureHook(
           ),
         );
       }
+    },
+  };
+}
+
+export function createSessionCaptureHook(
+  ctx: CaptureContext,
+  tags: ResolvedTags,
+  options?: CaptureOptions,
+) {
+  const captureEveryNTurns =
+    options?.captureEveryNTurns ?? CONFIG.captureEveryNTurns;
+  const writer = options?.writer ?? supermemoryClient;
+  const activeSessions = new Set<string>();
+  const inFlight = new Map<string, Promise<void>>();
+  const snapshots = new Map<string, SessionMessage[]>();
+
+  async function readMessages(sessionID: string): Promise<SessionMessage[]> {
+    const response = await ctx.client.session.messages({
+      path: { id: sessionID },
+      query: { directory: ctx.directory },
+    });
+    if (!Array.isArray(response) && !response.data) {
+      throw new Error(`Unable to read OpenCode session ${sessionID}`);
+    }
+    return Array.isArray(response) ? response : (response.data ?? []);
+  }
+
+  async function loadMessages(
+    sessionID: string,
+  ): Promise<SessionMessage[] | undefined> {
+    try {
+      const messages = await readMessages(sessionID);
+      snapshots.set(sessionID, messages);
+      return messages;
+    } catch (error) {
+      const cached = snapshots.get(sessionID);
+      log(
+        cached
+          ? "[capture] failed to read session transcript; using the last idle snapshot"
+          : "[capture] failed to read session transcript",
+        { sessionID, error: String(error) },
+      );
+      return cached;
+    }
+  }
+
+  async function capture(
+    sessionID: string,
+    everyNTurns?: number,
+  ): Promise<boolean> {
+    const messages = await loadMessages(sessionID);
+    if (!messages) return false;
+    return captureSession({
+      writer,
+      namespace: tags.canonical,
+      sessionId: sessionID,
+      messages,
+      metadata: sessionMetadata(tags.projectName, tags.projectId),
+      supportingContext: AGENT_ENTITY_CONTEXT,
+      timeoutMs: SESSION_CAPTURE_TIMEOUT_MS,
+      everyNTurns,
+      onSaved: options?.onSaved,
+    });
+  }
+
+  async function runExclusive(
+    sessionID: string,
+    task: () => Promise<void>,
+  ): Promise<void> {
+    const previous = inFlight.get(sessionID) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(task);
+    inFlight.set(sessionID, next);
+    holdExitUntilSettled(next);
+    try {
+      await next;
+    } finally {
+      if (inFlight.get(sessionID) === next) {
+        inFlight.delete(sessionID);
+      }
+    }
+  }
+
+  function finish(sessionID: string): void {
+    activeSessions.delete(sessionID);
+    snapshots.delete(sessionID);
+  }
+
+  return {
+    async event({ event }: { event: { type: string; properties?: unknown } }) {
+      const props = event.properties as Record<string, unknown> | undefined;
+
+      if (event.type === "message.updated") {
+        const info = props?.info as CaptureMessageInfo | undefined;
+        if (info?.sessionID) activeSessions.add(info.sessionID);
+        return;
+      }
+
+      if (event.type === "session.idle") {
+        const sessionID = props?.sessionID as string | undefined;
+        if (!sessionID) return;
+        activeSessions.add(sessionID);
+        await runExclusive(sessionID, async () => {
+          if (captureEveryNTurns > 0) {
+            await capture(sessionID, captureEveryNTurns);
+          } else {
+            await loadMessages(sessionID);
+          }
+        });
+        return;
+      }
+
+      if (event.type === "session.deleted") {
+        const sessionID = (props?.info as { id?: string } | undefined)?.id;
+        if (!sessionID) return;
+        activeSessions.add(sessionID);
+        await runExclusive(sessionID, async () => {
+          if (await capture(sessionID)) finish(sessionID);
+        });
+        return;
+      }
+
+      if (event.type === "server.instance.disposed") {
+        await Promise.all(
+          [...activeSessions].map((sessionID) =>
+            runExclusive(sessionID, async () => {
+              if (await capture(sessionID)) finish(sessionID);
+            }),
+          ),
+        );
+      }
+    },
+  };
+}
+
+// Legacy servers, including self-hosted 0.0.8, have no session endpoint, so they keep the client-formatted capture.
+export function createCaptureHook(
+  ctx: CaptureContext,
+  tags: ResolvedTags,
+  options?: CaptureOptions,
+) {
+  const legacy = createLegacyCaptureHook(ctx, tags, options);
+  const session = createSessionCaptureHook(ctx, tags, options);
+  return {
+    async event(input: { event: { type: string; properties?: unknown } }) {
+      let version: "legacy" | "v5";
+      try {
+        version = getApiVersion();
+      } catch (error) {
+        log("[capture] skipped; invalid apiVersion", { error: String(error) });
+        return;
+      }
+      await (version === "v5" ? session : legacy).event(input);
     },
   };
 }

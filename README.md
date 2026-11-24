@@ -183,7 +183,8 @@ By default the plugin makes no Supermemory calls from its hooks for:
 - **Subagent sessions.** Any session with a `parentID`, which OpenCode sets on child sessions
   spawned by the `task` (V1) or `subagent` (OpenCode 2) tool. Set `captureSubagents: true` or
   `SUPERMEMORY_CAPTURE_SUBAGENTS=true` to restore recall and capture for them.
-- **Headless runs (OpenCode V1).** `opencode run` and `opencode github run`, which host the
+- **Headless runs (OpenCode V1).** `opencode run` and `opencode github run` (including their
+  V5 session uploads), which host the
   server and plugins in the CLI process. Set `captureHeadless: true` or
   `SUPERMEMORY_CAPTURE_HEADLESS=true` to restore them. `opencode run --attach` on V1 runs the
   plugin in the attached server, so it is treated as interactive.
@@ -216,8 +217,9 @@ indexes under `~/.supermemory-opencode/` keep those repeats from being re-sent:
   base URL, credential and container tag in the last 24 hours, the capture is sent with a
   one-line `[Opening prompt omitted: ...]` marker in its place. The rest of the conversation is
   captured as usual. Older entries are ignored and pruned, nothing is deduped without a
-  credential, and `logout` deletes the index. Set `SUPERMEMORY_DEDUPE_OPENING_PROMPT=false` to
-  opt out.
+  credential, and `logout` deletes the index. It applies to the client-formatted capture used
+  with legacy servers; V5 session capture uploads the transcript unchanged. Set
+  `SUPERMEMORY_DEDUPE_OPENING_PROMPT=false` to opt out.
 - **Recall query** (`dedupeRecallQueries`, default `true`). When the same normalized query is
   recalled against the same container tag within 10 minutes, the result of the first successful
   search is re-served without another API call, so a new session still gets the same context. A
