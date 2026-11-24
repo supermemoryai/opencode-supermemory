@@ -52,6 +52,7 @@ import {
   RecallSessionCache,
   type DirectRecallResult,
 } from "../services/recall.js";
+import type { RecallHit } from "../services/recall-results.js";
 import { getTags, type ResolvedTags } from "../services/tags.js";
 import { checkNpmUpdate, type UpdateInfo } from "../services/version-check.js";
 import { SUPERMEMORY_RPC } from "../rpc.js";
@@ -66,7 +67,6 @@ const CODE_BLOCK_PATTERN = /```[\s\S]*?```/g;
 const INLINE_CODE_PATTERN = /`[^`]+`/g;
 const SYNTHETIC_METADATA_KEY = "supermemory";
 const UPDATE_COMMAND = "bunx opencode-supermemory@latest install";
-const MAX_DISPATCHES_PER_SESSION = 8;
 const MIN_SUMMARY_CHARS = 100;
 const MAX_SUMMARY_ATTEMPTS = 5;
 const SUMMARY_RETRY_BASE_MS = 15_000;
@@ -176,6 +176,7 @@ export interface TranscriptMessage {
 interface Injection {
   start: string[];
   end: string[];
+  recalled: RecallHit[];
 }
 
 interface SessionState {
@@ -183,8 +184,8 @@ interface SessionState {
   tags?: ResolvedTags;
   resolving?: Promise<ResolvedTags>;
   injectedInitialContext: boolean;
-  dispatches: Map<string, Promise<Injection>>;
-  dispatchOrder: string[];
+  injections: Map<string, Promise<Injection>>;
+  applied: Map<string, RecallHit[]>;
   turns: CaptureTurn[];
   turnIndex: Map<string, number>;
   completedCaptureIds: Set<string>;
@@ -275,15 +276,11 @@ function makeSyntheticPart(text: string, kind: string): RequestContentPart {
   } as RequestContentPart;
 }
 
-/**
- * Adds plugin context to the outgoing copy of the latest user message. Hook
- * messages are request-local, so the same injection is re-applied on every
- * model call for the same prompt (including tool continuations).
- */
+/** Hook messages are request-local, so every call re-applies each prompt's injection to keep earlier turns cache-identical. */
 export function applyInjection(
   messages: RequestMessage[],
   message: RequestMessage,
-  injection: Injection,
+  injection: Pick<Injection, "start" | "end">,
 ): void {
   if (injection.start.length === 0 && injection.end.length === 0) return;
   if (message.content.some(isSyntheticPart)) return;
@@ -675,33 +672,42 @@ export class V2Runtime {
     messages: RequestMessage[];
   }): Promise<void> {
     if (!this.#configured) return;
-    const latestUser = event.messages.findLast((message) => message.role === "user");
+    const users = event.messages.filter((message) => message.role === "user");
+    const latestUser = users.at(-1);
     if (!latestUser) return;
-    const userText = extractMessageText(latestUser);
-    if (!userText) return;
 
-    const state = this.#state(event.sessionID);
-    const key = this.#dispatchKey(event.messages, latestUser, userText);
-    let pending = state.dispatches.get(key);
-    if (!pending) {
-      pending = this.#buildInjection(event.sessionID, state, userText).catch(
-        (error): Injection => {
-          this.#deps.logger("v2 context injection failed", {
-            sessionID: event.sessionID,
-            error: String(error),
-          });
-          return { start: [], end: [] };
-        },
+    const { sessionID } = event;
+    const state = this.#state(sessionID);
+    const keys = users.map((message, index) => this.#injectionKey(message, index));
+    const latestKey = keys[keys.length - 1] as string;
+    const userText = extractMessageText(latestUser);
+    if (userText && !state.injections.has(latestKey)) {
+      state.injections.set(
+        latestKey,
+        this.#buildInjection(sessionID, state, userText).catch(
+          (error): Injection => {
+            this.#deps.logger("v2 context injection failed", {
+              sessionID,
+              error: String(error),
+            });
+            return { start: [], end: [], recalled: [] };
+          },
+        ),
       );
-      state.dispatches.set(key, pending);
-      state.dispatchOrder.push(key);
-      while (state.dispatchOrder.length > MAX_DISPATCHES_PER_SESSION) {
-        const oldest = state.dispatchOrder.shift();
-        if (oldest) state.dispatches.delete(oldest);
+    }
+    this.#pruneInjections(sessionID, state, new Set(keys));
+
+    for (const [index, message] of users.entries()) {
+      const key = keys[index] as string;
+      const pending = state.injections.get(key);
+      if (!pending) continue;
+      const injection = await pending;
+      applyInjection(event.messages, message, injection);
+      if (!state.applied.has(key)) {
+        state.applied.set(key, injection.recalled);
+        this.#recall.remember(sessionID, injection.recalled);
       }
     }
-
-    applyInjection(event.messages, latestUser, await pending);
   }
 
   async handleCompaction(event: {
@@ -834,8 +840,8 @@ export class V2Runtime {
     if (existing) return existing;
     const state: SessionState = {
       injectedInitialContext: false,
-      dispatches: new Map(),
-      dispatchOrder: [],
+      injections: new Map(),
+      applied: new Map(),
       turns: [],
       turnIndex: new Map(),
       completedCaptureIds: new Set(),
@@ -865,15 +871,22 @@ export class V2Runtime {
     }
   }
 
-  #dispatchKey(
-    messages: RequestMessage[],
-    latestUser: RequestMessage,
-    text: string,
-  ): string {
-    const id = (latestUser as { id?: string }).id;
+  #injectionKey(message: RequestMessage, userIndex: number): string {
+    const id = (message as { id?: string }).id;
     if (id) return id;
-    const userCount = messages.filter((message) => message.role === "user").length;
-    return `dispatch:${userCount}:${sha256(text)}`;
+    return `dispatch:${userIndex + 1}:${sha256(extractMessageText(message))}`;
+  }
+
+  // Prompts that left the request (compaction) free their memories for recall again.
+  #pruneInjections(sessionID: string, state: SessionState, present: Set<string>): void {
+    for (const key of state.injections.keys()) {
+      if (present.has(key)) continue;
+      state.injections.delete(key);
+      const recalled = state.applied.get(key);
+      if (!recalled) continue;
+      state.applied.delete(key);
+      this.#recall.forget(sessionID, recalled);
+    }
   }
 
   async #resolveSession(sessionID: string): Promise<ResolvedTags> {
@@ -933,7 +946,7 @@ export class V2Runtime {
         sessionID,
         error: String(error),
       });
-      return { start, end };
+      return { start, end, recalled: [] };
     }
 
     const profileRequest =
@@ -957,6 +970,7 @@ export class V2Runtime {
             prompt: userText,
             sessionID,
             cache: this.#recall,
+            markSeen: false,
             search: (query) =>
               memoryClient.searchMemoriesForRecall(
                 query,
@@ -1009,7 +1023,7 @@ export class V2Runtime {
       firstMessageContextLength: firstMessageContext.length,
       directRecallContextLength: recall.context.length,
     });
-    return { start, end };
+    return { start, end, recalled: recall.hits ?? [] };
   }
 
   async #projectMemories(sessionID: string): Promise<string[]> {

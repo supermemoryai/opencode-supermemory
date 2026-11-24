@@ -103,6 +103,31 @@ export class RecallSessionCache {
     return hits.filter((hit) => this.rememberHash(state, recallHash(hit)));
   }
 
+  peekFresh(sessionID: string, hits: RecallHit[]): RecallHit[] {
+    const seen = new Set(this.sessions.get(sessionID)?.seen);
+    return hits.filter((hit) => {
+      const hash = recallHash(hit);
+      if (seen.has(hash)) return false;
+      seen.add(hash);
+      return true;
+    });
+  }
+
+  remember(sessionID: string, hits: RecallHit[]): void {
+    const state = this.getState(sessionID);
+    for (const hit of hits) this.rememberHash(state, recallHash(hit));
+  }
+
+  forget(sessionID: string, hits: RecallHit[]): void {
+    const state = this.sessions.get(sessionID);
+    if (!state) return;
+    for (const hit of hits) {
+      const hash = recallHash(hit);
+      if (!state.seen.delete(hash)) continue;
+      state.order.splice(state.order.indexOf(hash), 1);
+    }
+  }
+
   delete(sessionID: string): void {
     this.sessions.delete(sessionID);
   }
@@ -128,6 +153,7 @@ export interface DirectRecallResult {
   status: "skipped" | "empty" | "recalled" | "unavailable";
   count: number;
   tokens: number;
+  hits?: RecallHit[];
 }
 
 export async function buildDirectRecallResult(options: {
@@ -136,6 +162,7 @@ export async function buildDirectRecallResult(options: {
   cache: RecallSessionCache;
   search: (query: string) => Promise<SearchResponse>;
   suppressTexts?: Iterable<string> | Promise<Iterable<string>>;
+  markSeen?: boolean;
 }): Promise<DirectRecallResult> {
   try {
     const query = prepareRecallQuery(options.prompt);
@@ -162,7 +189,10 @@ export async function buildDirectRecallResult(options: {
       return { context: "", status: "unavailable", count: 0, tokens: 0 };
     }
     const hits = normalizeRecallResults(response.results ?? []);
-    const freshHits = options.cache.takeFresh(options.sessionID, hits);
+    const freshHits =
+      options.markSeen === false
+        ? options.cache.peekFresh(options.sessionID, hits)
+        : options.cache.takeFresh(options.sessionID, hits);
     if (freshHits.length === 0) {
       return { context: "", status: "empty", count: 0, tokens: 0 };
     }
@@ -173,6 +203,7 @@ export async function buildDirectRecallResult(options: {
       status: "recalled",
       count: freshHits.length,
       tokens: Math.round(context.length / 4),
+      hits: freshHits,
     };
   } catch {
     return { context: "", status: "unavailable", count: 0, tokens: 0 };
