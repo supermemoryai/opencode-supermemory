@@ -51,6 +51,7 @@ import {
   buildDirectRecallResult,
   buildRecallDirective,
   DIRECT_RECALL_TIMEOUT_MS,
+  isOutOfCredits,
   RecallSessionCache,
   type DirectRecallResult,
 } from "../services/recall.js";
@@ -1029,7 +1030,13 @@ export class V2Runtime {
       updateCheck,
     ]);
 
-    if (recall.status === "recalled") {
+    const profileResult = await profileRequest;
+    if (
+      recall.status === "out-of-credits" ||
+      (profileResult?.success === false && isOutOfCredits(profileResult.error))
+    ) {
+      this.#activity.outOfCredits(sessionID);
+    } else if (recall.status === "recalled") {
       this.#activity.recalled(recall.count, recall.tokens);
     } else if (recall.status === "unavailable") {
       this.#activity.recallUnavailable();

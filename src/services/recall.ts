@@ -123,9 +123,14 @@ function formatDirectRecallContext(hits: RecallHit[]): string {
   ].join("\n");
 }
 
+// The API answers 402 to recall at $0 credits; both SDKs keep the status in the error text.
+export function isOutOfCredits(error: string | undefined): boolean {
+  return /^402 |Status code: 402\b/.test(error ?? "");
+}
+
 export interface DirectRecallResult {
   context: string;
-  status: "skipped" | "empty" | "recalled" | "unavailable";
+  status: "skipped" | "empty" | "recalled" | "unavailable" | "out-of-credits";
   count: number;
   tokens: number;
 }
@@ -159,7 +164,12 @@ export async function buildDirectRecallResult(options: {
 
     const response = await searchPromise;
     if (!response?.success) {
-      return { context: "", status: "unavailable", count: 0, tokens: 0 };
+      return {
+        context: "",
+        status: isOutOfCredits(response?.error) ? "out-of-credits" : "unavailable",
+        count: 0,
+        tokens: 0,
+      };
     }
     const hits = normalizeRecallResults(response.results ?? []);
     const freshHits = options.cache.takeFresh(options.sessionID, hits);

@@ -9,6 +9,7 @@ export type ActivityKind =
   | "recalling"
   | "recalled"
   | "recall-unavailable"
+  | "out-of-credits"
   | "saved"
   | "update-available";
 
@@ -25,12 +26,14 @@ export interface MemoryActivityReporter {
   recalling(query?: string): void;
   recalled(count: number, tokens: number): void;
   recallUnavailable(): void;
+  outOfCredits(sessionID: string): void;
   saved(): void;
   updateAvailable(info: UpdateInfo): void;
 }
 
 export const ACTIVITY_TITLE = "Supermemory";
 const ACTIVITY_PREFIX = "◪ supermemory · ";
+const BILLING_URL = "https://console.supermemory.ai/billing";
 
 function notice(
   kind: ActivityKind,
@@ -62,6 +65,8 @@ export function createMemoryActivityReporterFromSink(
     }
   };
 
+  const creditNoticeSessions = new Set<string>();
+
   return {
     recalling(query) {
       const suffix = query?.trim() ? `: ${query.trim().slice(0, 100)}` : "";
@@ -84,6 +89,18 @@ export function createMemoryActivityReporterFromSink(
           "recall unavailable; continuing without recalled context",
           "warning",
           3_000,
+        ),
+      );
+    },
+    outOfCredits(sessionID) {
+      if (creditNoticeSessions.has(sessionID)) return;
+      creditNoticeSessions.add(sessionID);
+      emit(
+        notice(
+          "out-of-credits",
+          `recall paused · You've run out of credits. Top up to continue. ${BILLING_URL}`,
+          "warning",
+          8_000,
         ),
       );
     },
