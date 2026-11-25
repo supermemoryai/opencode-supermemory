@@ -12,6 +12,7 @@ import {
   buildDirectRecallResult,
   buildRecallDirective,
   DIRECT_RECALL_TIMEOUT_MS,
+  isOutOfCredits,
   RecallSessionCache,
 } from "./services/recall.js";
 import { createMemoryActivityReporter } from "./services/activity.js";
@@ -250,7 +251,13 @@ export const SupermemoryPlugin: Plugin = async (ctx: PluginInput) => {
           updateCheck,
         ]);
 
-        if (directRecall.status === "recalled") {
+        const profileResult = await profileRequest;
+        if (
+          directRecall.status === "out-of-credits" ||
+          (profileResult?.success === false && isOutOfCredits(profileResult.error))
+        ) {
+          activity.outOfCredits(input.sessionID);
+        } else if (directRecall.status === "recalled") {
           activity.recalled(directRecall.count, directRecall.tokens);
         } else if (directRecall.status === "unavailable") {
           activity.recallUnavailable();

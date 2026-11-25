@@ -147,6 +147,7 @@ interface Harness {
 function harness(
   config: Partial<V2RuntimeDependencies["config"]> = {},
   apiVersion: "legacy" | "v5" = "legacy",
+  clientOverrides: Record<string, unknown> = {},
 ): Harness {
   const tools = new Map<string, FakeTool>();
   const hooks: Harness["hooks"] = {};
@@ -265,6 +266,7 @@ function harness(
       return { success: true, id: "mem_1" };
     },
     deleteMemory: async () => ({ success: true }),
+    ...clientOverrides,
   };
 
   const runtime = new V2Runtime(ctx as unknown as V2Context, {
@@ -391,6 +393,28 @@ describe("OpenCode 2 runtime", () => {
     await h.runtime.handleContext({ sessionID: "s1", messages: [message] });
     expect(texts(message).at(-1)).toContain(SUPERMEMORY_RECALL_TOOL_NAME);
     expect(h.queries).toHaveLength(0);
+    h.runtime.cleanup();
+  });
+
+  test("an out-of-credits refusal shows one notice per session and leaves the prompt untouched", async () => {
+    const refusal = '402 {"error":"Search query limit reached","details":"You\'ve run out of credits. Top up to continue."}';
+    const h = harness({}, "legacy", {
+      getProfileScoped: async () => ({ success: false, error: refusal, profile: null }),
+      searchMemoriesForRecall: async () => ({ success: false, error: refusal, results: [] }),
+    });
+    await h.runtime.register();
+    const prompts: Array<[string, string]> = [["s1", "u1"], ["s1", "u2"], ["s1", "u3"], ["s2", "u4"]];
+    for (const [sessionID, id] of prompts) {
+      const message = request(id, "how did we set up the database migrations?");
+      await h.runtime.handleContext({ sessionID, messages: [message] });
+      expect(texts(message)).toEqual(["how did we set up the database migrations?"]);
+    }
+    const notices = h.emitted.filter((event) => event.kind === "out-of-credits");
+    expect(notices).toHaveLength(2);
+    expect(notices[0]?.message).toBe(
+      "◪ supermemory · recall paused · You've run out of credits. Top up to continue. https://console.supermemory.ai/billing",
+    );
+    expect(h.emitted.some((event) => event.kind === "recall-unavailable")).toBe(false);
     h.runtime.cleanup();
   });
 
