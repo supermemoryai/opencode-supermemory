@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -43,6 +44,11 @@ interface SupermemoryConfig {
   captureEveryNTurns?: number;
   recallDirective?: string | null;
   recallMode?: RecallMode;
+  captureSubagents?: boolean;
+  captureHeadless?: boolean;
+  captureOrchestrated?: boolean;
+  dedupeOpeningPrompt?: boolean;
+  dedupeRecallQueries?: boolean;
 }
 
 const DEFAULT_KEYWORD_PATTERNS = [
@@ -77,6 +83,11 @@ const DEFAULTS: Required<Omit<SupermemoryConfig, "apiKey" | "baseUrl" | "apiVers
   autoRecallEveryPrompt: false,
   captureEveryNTurns: 0,
   recallMode: "direct",
+  captureSubagents: false,
+  captureHeadless: false,
+  captureOrchestrated: true,
+  dedupeOpeningPrompt: true,
+  dedupeRecallQueries: true,
 };
 
 function isValidRegex(pattern: string): boolean {
@@ -109,6 +120,13 @@ function validateCaptureEveryNTurns(
     return fallback;
   }
   return value;
+}
+
+function resolveFlag(envName: string, value: unknown, fallback: boolean): boolean {
+  const env = process.env[envName]?.trim().toLowerCase() ?? "";
+  if (["true", "1", "yes", "on"].includes(env)) return true;
+  if (["false", "0", "no", "off"].includes(env)) return false;
+  return typeof value === "boolean" ? value : fallback;
 }
 
 function resolveRecallMode(): RecallMode {
@@ -147,6 +165,20 @@ export function getApiKey(): string | undefined {
   if (process.env.SUPERMEMORY_API_KEY) return process.env.SUPERMEMORY_API_KEY;
   if (fileConfig.apiKey) return fileConfig.apiKey;
   return loadCredentials();
+}
+
+/** Hash of the backend URL and credential that scopes local dedupe and recall caching; null without a credential. */
+export function getDedupeScope(): string | null {
+  try {
+    const apiKey = getApiKey();
+    const saved = apiKey ? null : loadCredentialData();
+    const credential =
+      apiKey ?? (saved?.type === "oauth" ? (saved.refreshToken ?? saved.accessToken) : undefined);
+    if (!credential) return null;
+    return createHash("sha256").update(`${getApiBaseUrl()}\n${credential}`).digest("hex");
+  } catch {
+    return null;
+  }
 }
 
 function normalizeBaseUrl(baseUrl: unknown): string | null {
@@ -285,6 +317,31 @@ export const CONFIG = {
     configExisted ? 3 : DEFAULTS.captureEveryNTurns,
   ),
   recallDirective: fileConfig.recallDirective ?? null,
+  captureSubagents: resolveFlag(
+    "SUPERMEMORY_CAPTURE_SUBAGENTS",
+    fileConfig.captureSubagents,
+    DEFAULTS.captureSubagents,
+  ),
+  captureHeadless: resolveFlag(
+    "SUPERMEMORY_CAPTURE_HEADLESS",
+    fileConfig.captureHeadless,
+    DEFAULTS.captureHeadless,
+  ),
+  captureOrchestrated: resolveFlag(
+    "SUPERMEMORY_CAPTURE_ORCHESTRATED",
+    fileConfig.captureOrchestrated,
+    DEFAULTS.captureOrchestrated,
+  ),
+  dedupeOpeningPrompt: resolveFlag(
+    "SUPERMEMORY_DEDUPE_OPENING_PROMPT",
+    fileConfig.dedupeOpeningPrompt,
+    DEFAULTS.dedupeOpeningPrompt,
+  ),
+  dedupeRecallQueries: resolveFlag(
+    "SUPERMEMORY_DEDUPE_RECALL_QUERIES",
+    fileConfig.dedupeRecallQueries,
+    DEFAULTS.dedupeRecallQueries,
+  ),
 };
 
 /** Resolved on every call so login and logout apply without restarting OpenCode. */
