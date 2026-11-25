@@ -1252,6 +1252,7 @@ export class V2Runtime {
       timeoutMs: SESSION_CAPTURE_TIMEOUT_MS,
       everyNTurns,
       onSaved: () => this.#activity.saved(),
+      onCaptureWarning: (message) => this.#activity.captureWarning(message),
       logger: this.#deps.logger,
     });
   }

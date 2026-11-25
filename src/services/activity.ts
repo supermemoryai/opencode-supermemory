@@ -10,6 +10,7 @@ export type ActivityKind =
   | "recalled"
   | "recall-unavailable"
   | "saved"
+  | "capture-warning"
   | "update-available";
 
 /** A user-facing notice about Supermemory activity, independent of the UI. */
@@ -26,6 +27,7 @@ export interface MemoryActivityReporter {
   recalled(count: number, tokens: number): void;
   recallUnavailable(): void;
   saved(): void;
+  captureWarning(message: string): void;
   updateAvailable(info: UpdateInfo): void;
 }
 
@@ -89,6 +91,9 @@ export function createMemoryActivityReporterFromSink(
     },
     saved() {
       emit(notice("saved", "saved this turn", "success", 2_000));
+    },
+    captureWarning(message) {
+      emit(notice("capture-warning", message, "warning", 6_000));
     },
     updateAvailable(info) {
       emit(

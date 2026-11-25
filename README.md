@@ -388,7 +388,13 @@ memories. Account status reads `/session`; only legacy mode falls back to
 
 v5 capture uses document POST append/diff with `dreaming: "dynamic"`; accepted
 documents may take minutes to form recallable memories. The plugin does not enable
-the extra-billable instant mode. Profiles normalize fact objects to text and issue
+the extra-billable instant mode. Session capture sends new messages in chunks of
+whole messages up to 256 KB within a 25-second budget and moves the cursor after
+each accepted chunk. A single message over 256 KB keeps its JSON shape with long
+strings cut to 16k characters. A chunk the server rejects with 400, 413, 415, or
+422 is skipped so later turns still go out; a notice says so, and the skipped
+message ranges stay in the cursor file under `~/.supermemory-opencode/session/`.
+Other failures leave the cursor at that chunk for the next capture. Profiles normalize fact objects to text and issue
 a separate search only when a query is requested. Document lists fetch canonical
 content per document to retain the previous content-inclusive response, so lists
 and compaction can require additional requests under the existing timeout budget.
